@@ -137,7 +137,12 @@ function GameView:_build()
     local it_extra = 2 * (Size.border.inputtext + Size.margin.default + it_pad)
     local btn_w    = math.floor(sw * 0.14)
     local itext_w  = sw - btn_w - it_extra
-    local itext_h  = math.ceil(self._face.size * 1.6) + 2 * it_pad
+    -- One line of text.  InputText uses this value as the inner TextBoxWidget
+    -- height, where lines_per_page = floor(height / line_height_px) and
+    -- line_height_px = round(1.3 * face.size).  It adds its own padding/border
+    -- around this, so we must NOT add it_pad here — doing so divides into the
+    -- line height twice and the field renders two lines tall.
+    local itext_h  = math.ceil(self._face.size * 1.3)
 
     self._input_widget = InputText:new{
         text           = "",
@@ -535,6 +540,7 @@ function GameView:showMenu()
     }})
     menu = ButtonDialog:new{
         modal  = true,
+        shrink_unneeded_width = true,
         anchor = function()
             return self._title_bar.left_button.image.dimen
         end,
