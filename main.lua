@@ -2,8 +2,11 @@ local DataStorage     = require("datastorage")
 local InfoMessage     = require("ui/widget/infomessage")
 local LuaSettings     = require("luasettings")
 local PathChooser     = require("ui/widget/pathchooser")
+local RenderText      = require("ui/rendertext")
+local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Font            = require("ui/font")
 local ffiUtil         = require("ffi/util")
 local logger          = require("logger")
 local util            = require("util")
@@ -20,6 +23,8 @@ local EXTENSIONS = {
     z5=true, z6=true, z7=true, z8=true,
     zblorb=true, dat=true,
 }
+
+local DEFAULT_FONT_SIZE = 20
 
 local Frotz = WidgetContainer:extend{
     name        = "frotz",
@@ -79,6 +84,13 @@ function Frotz:_buildMenuItems()
     return items
 end
 
+-- ── Display settings ────────────────────────────────────────────────────────────
+
+function Frotz:_fontSize()
+    self:_loadSettings()
+    return self._settings:readSetting("font_size") or DEFAULT_FONT_SIZE
+end
+
 -- ── File browser ──────────────────────────────────────────────────────────────
 
 function Frotz:_openFileBrowser()
@@ -108,11 +120,27 @@ function Frotz:_startGame(gamefile)
     local Session  = require("session")
     local GameView = require("gameview")
 
-    -- cols is the wrap width dfrotz uses for its output lines.
+    local font_size = self:_fontSize()
+
+    -- cols is the wrap width dfrotz uses for its output lines.  GameView renders
+    -- the transcript in a monospace face ("infont"), so one glyph advance is
+    -- constant: cols = usable text width / advance makes dfrotz's wrapping line
+    -- up exactly with the rendered width (no double-wrapping, ASCII maps align).
+    --
+    -- usable must be the TextBoxWidget's inner width, not the ScrollTextWidget's
+    -- outer width: ScrollTextWidget reserves scroll_bar_width (6) + text_scroll_span
+    -- (12) on the right (see scrolltextwidget.lua).  GameView passes the outer
+    -- width as sw - 2*padding.large (its _scroll_w).  Omitting the scroll overhead
+    -- overcounts by a fixed ~18px, which at large font sizes is a whole extra
+    -- column and overflows the screen.
+    local face          = Font:getFace("infont", font_size)
+    local advance       = RenderText:sizeUtf8Text(0, Screen:getWidth(), face, "0").x
+    local scroll_overhead = Screen:scaleBySize(6) + Screen:scaleBySize(12)
+    local usable        = Screen:getWidth() - 2 * Size.padding.large - scroll_overhead
+    local cols          = math.max(20, math.floor(usable / advance))
     -- rows is deliberately large: MORE is disabled (-m in session.lua), so the
     -- screen buffer must hold a whole turn's output without scrolling lines off
     -- the top.  The UI paginates this output itself (see gameview.lua).
-    local cols = 56 --math.max(40, math.floor(Screen:getWidth() / 8))
     local rows = 200
 
     local ok, result = pcall(Session.new, Session, DFROTZ_BIN, gamefile, cols, rows)
@@ -130,6 +158,8 @@ function Frotz:_startGame(gamefile)
     local game_view = GameView:new{
         session    = result,
         game_title = fname,
+        font_size  = font_size,
+        settings   = self._settings,
         on_close   = function()
             self._game_view = nil
         end,

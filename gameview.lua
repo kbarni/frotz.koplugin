@@ -7,11 +7,13 @@ local Font             = require("ui/font")
 local FrameContainer   = require("ui/widget/container/framecontainer")
 local Geom             = require("ui/geometry")
 local HorizontalGroup  = require("ui/widget/horizontalgroup")
+local InfoMessage      = require("ui/widget/infomessage")
 local InputContainer   = require("ui/widget/container/inputcontainer")
 local InputText        = require("ui/widget/inputtext")
 local LineWidget       = require("ui/widget/linewidget")
 local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local Size             = require("ui/size")
+local SpinWidget       = require("ui/widget/spinwidget")
 local TitleBar         = require("ui/widget/titlebar")
 local UIManager        = require("ui/uimanager")
 local time             = require("ui/time")
@@ -20,6 +22,9 @@ local VerticalSpan     = require("ui/widget/verticalspan")
 local logger           = require("logger")
 local _                = require("gettext")
 local Screen           = Device.screen
+
+local MIN_FONT_SIZE   = 14
+local MAX_FONT_SIZE   = 32
 
 local POLL_INTERVAL_S = 0.05   -- 50 ms between output checks
 local SETTLE_TIME_S   = 0.15   -- 150 ms quiet → dfrotz is waiting for input
@@ -51,6 +56,8 @@ local GameView = FrameContainer:extend{
     game_title = "Interactive Fiction",
     session    = nil,
     on_close   = nil,
+    font_size  = 20,    -- transcript font size; overridden by the caller
+    settings   = nil,   -- LuaSettings, so the font-size menu can persist changes
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -69,7 +76,9 @@ function GameView:init()
     self._keyboard_visible = true   -- on-screen keyboard is shown on startup
     self._sw              = Screen:getWidth()
     self._sh              = Screen:getHeight()
-    self._face            = Font:getFace("x_smallinfofont")
+    -- Monospace face so dfrotz's column wrapping (the -w value) lines up exactly
+    -- with the rendered width; see main.lua _startGame for the cols derivation.
+    self._face            = Font:getFace("infont", self.font_size)
     self:_build()
 end
 
@@ -532,6 +541,13 @@ function GameView:showMenu()
         }})
     end
     table.insert(buttons, {{
+        text     = _("Font size"),
+        callback = function()
+            UIManager:close(menu)
+            self:_showFontSizeDialog()
+        end,
+    }})
+    table.insert(buttons, {{
         text     = _("Close game"),
         callback = function()
             UIManager:close(menu)
@@ -547,6 +563,35 @@ function GameView:showMenu()
         buttons = buttons,
     }
     UIManager:show(menu)
+end
+
+-- Font size persists to settings and applies on the next game launch: changing
+-- it requires re-spawning dfrotz with a new -w (column) value, which would lose
+-- the current game, so we don't restart the live process here.
+function GameView:_showFontSizeDialog()
+    -- modal = true is essential: the on-screen keyboard is itself a modal, so a
+    -- non-modal dialog would be placed *below* it in the window stack (hidden
+    -- behind the OSK, taps stolen).  As a modal, the dialog sits above the
+    -- keyboard, so we can leave the keyboard up and need no hide/restore dance.
+    UIManager:show(SpinWidget:new{
+        modal       = true,
+        title_text  = _("Font size"),
+        info_text   = _("Size of the game text. Changes take effect after restarting Frotz."),
+        value       = self.font_size,
+        value_min   = MIN_FONT_SIZE,
+        value_max   = MAX_FONT_SIZE,
+        value_step  = 1,
+        ok_text     = _("Set"),
+        callback    = function(spin)
+            if self.settings then
+                self.settings:saveSetting("font_size", spin.value)
+                self.settings:flush()
+            end
+            UIManager:show(InfoMessage:new{
+                text = _("Changes will take effect after restarting Frotz."),
+            })
+        end,
+    })
 end
 
 function GameView:_issueCommand(command)
