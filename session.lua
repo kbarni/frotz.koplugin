@@ -95,6 +95,94 @@ function Session:read_output_nonblocking()
     return (#chunk > 0) and chunk or nil
 end
 
+-- ── Synchronous save/restore ────────────────────────────────────────────────────
+--
+-- dfrotz drives save/restore as an interactive prompt: we send "save"/"restore",
+-- it replies "Please enter a filename [..]: " and blocks on stdin, we send a
+-- path, and (on save over an existing file) it asks "Overwrite existing file? ".
+-- These helpers drive that exchange synchronously.  They are quick and bounded,
+-- and must only be called when the UI's async poller is idle (between turns, at
+-- close, or right after the intro settles) so they don't fight over out_file.
+--
+-- Success/failure text after the opcode comes from the *game's* Z-code, not
+-- dfrotz, so it is not a reliable signal.  We instead detect completion by the
+-- output going quiet (same as a turn) and verify a save by stat-ing the file.
+
+local POLL_STEP_US = 20000   -- 20 ms between reads while driving a prompt
+
+-- Block until the accumulated output contains `needle` (a plain substring), or
+-- `timeout_s` elapses.  Returns the accumulated text, or nil + text on timeout.
+function Session:_read_until(needle, timeout_s)
+    local waited = 0
+    local acc    = ""
+    while waited < timeout_s * 1e6 do
+        local chunk = self:read_output_nonblocking()
+        if chunk then
+            acc = acc .. chunk
+            if acc:find(needle, 1, true) then return acc end
+        end
+        ffiUtil.usleep(POLL_STEP_US)
+        waited = waited + POLL_STEP_US
+    end
+    return nil, acc
+end
+
+-- Drain output until it stops growing for `quiet_s`, or `timeout_s` total.
+-- Returns everything read.
+function Session:_read_until_settle(quiet_s, timeout_s)
+    local waited       = 0
+    local since_growth = 0
+    local acc          = ""
+    while waited < timeout_s * 1e6 do
+        local chunk = self:read_output_nonblocking()
+        if chunk then
+            acc          = acc .. chunk
+            since_growth = 0
+        else
+            since_growth = since_growth + POLL_STEP_US
+            if acc ~= "" and since_growth >= quiet_s * 1e6 then break end
+        end
+        ffiUtil.usleep(POLL_STEP_US)
+        waited = waited + POLL_STEP_US
+    end
+    return acc
+end
+
+-- Save the current game to `path` (a full path ending in .qzl).  Overwrites
+-- silently.  Returns true if the save file exists and is non-empty afterwards.
+function Session:save_game(path)
+    if not self._stdin then return false end
+    self:send_input("save")
+    if not self:_read_until("enter a filename", 3) then
+        return false
+    end
+    self:send_input(path)
+    local resp = self:_read_until_settle(0.2, 3)
+    if resp:find("Overwrite", 1, true) then
+        self:send_input("y")
+        self:_read_until_settle(0.2, 3)
+    end
+    local sz = lfs.attributes(path, "size")
+    return sz ~= nil and sz > 0
+end
+
+-- Restore the game from `path`.  Returns success (boolean) and the game text
+-- dfrotz printed after restoring (the current location), already read off the
+-- stream so the UI can show it.  Fails fast if the file is missing.
+function Session:restore_game(path)
+    if not self._stdin then return false end
+    if not lfs.attributes(path, "mode") then return false, nil end
+    self:send_input("restore")
+    if not self:_read_until("enter a filename", 3) then
+        return false, nil
+    end
+    self:send_input(path)
+    local resp = self:_read_until_settle(0.2, 3)
+    -- A failed restore makes the game print "Failed."; anything else is a win.
+    local ok = not resp:lower():find("failed", 1, true)
+    return ok, resp
+end
+
 function Session:terminate()
     if self._stdin then
         self._stdin:close()

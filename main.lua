@@ -1,6 +1,8 @@
+local ConfirmBox      = require("ui/widget/confirmbox")
 local DataStorage     = require("datastorage")
 local InfoMessage     = require("ui/widget/infomessage")
 local LuaSettings     = require("luasettings")
+local lfs             = require("libs/libkoreader-lfs")
 local PathChooser     = require("ui/widget/pathchooser")
 local RenderText      = require("ui/rendertext")
 local Size            = require("ui/size")
@@ -143,29 +145,54 @@ function Frotz:_startGame(gamefile)
     -- the top.  The UI paginates this output itself (see gameview.lua).
     local rows = 200
 
-    local ok, result = pcall(Session.new, Session, DFROTZ_BIN, gamefile, cols, rows)
-    if not ok then
-        UIManager:show(InfoMessage:new{
-            text = _("Failed to start dfrotz:\n") .. tostring(result),
-        })
-        logger.err("Frotz: session error:", result)
-        return
-    end
-
     self:_saveSetting("last_game", gamefile)
 
+    -- Per-game save directory: DataDir/frotz_saves/<sanitised story name>/.
+    -- Holds the numbered slots and the autosave written on close.
     local _dir, fname = util.splitFilePathName(gamefile)
-    local game_view = GameView:new{
-        session    = result,
-        game_title = fname,
-        font_size  = font_size,
-        settings   = self._settings,
-        on_close   = function()
-            self._game_view = nil
-        end,
-    }
-    self._game_view = game_view
-    game_view:show()
+    local stem        = fname:gsub("%.[^.]+$", "")
+    local safe_name   = stem:gsub("[^%w%-_]", "_")
+    local save_dir    = DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
+    util.makePath(save_dir)
+    local autosave_path = save_dir .. "/autosave.qzl"
+
+    local function launch(auto_restore)
+        local ok, result = pcall(Session.new, Session, DFROTZ_BIN, gamefile, cols, rows)
+        if not ok then
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to start dfrotz:\n") .. tostring(result),
+            })
+            logger.err("Frotz: session error:", result)
+            return
+        end
+
+        local game_view = GameView:new{
+            session      = result,
+            game_title   = fname,
+            font_size    = font_size,
+            settings     = self._settings,
+            save_dir     = save_dir,
+            auto_restore = auto_restore,
+            on_close     = function()
+                self._game_view = nil
+            end,
+        }
+        self._game_view = game_view
+        game_view:show()
+    end
+
+    -- Offer to pick up from the autosave if one exists (feature #4).
+    if lfs.attributes(autosave_path, "mode") then
+        UIManager:show(ConfirmBox:new{
+            text            = _("Resume where you left off?"),
+            ok_text         = _("Resume"),
+            cancel_text     = _("Start over"),
+            ok_callback     = function() launch(true) end,
+            cancel_callback = function() launch(false) end,
+        })
+    else
+        launch(false)
+    end
 end
 
 function Frotz:onFlushSettings()

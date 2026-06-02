@@ -19,9 +19,22 @@ local UIManager        = require("ui/uimanager")
 local time             = require("ui/time")
 local VerticalGroup    = require("ui/widget/verticalgroup")
 local VerticalSpan     = require("ui/widget/verticalspan")
+local lfs              = require("libs/libkoreader-lfs")
 local logger           = require("logger")
 local _                = require("gettext")
+local T                = require("ffi/util").template
 local Screen           = Device.screen
+
+-- Save slots shown in the Save/Restore pickers.  "autosave" is the slot written
+-- on close and offered at launch (feature #4); the rest are manual slots (#3).
+local SAVE_SLOTS = {
+    { name = "autosave", label = _("Autosave") },
+    { name = "slot1",    label = _("Slot 1")   },
+    { name = "slot2",    label = _("Slot 2")   },
+    { name = "slot3",    label = _("Slot 3")   },
+    { name = "slot4",    label = _("Slot 4")   },
+    { name = "slot5",    label = _("Slot 5")   },
+}
 
 local MIN_FONT_SIZE   = 14
 local MAX_FONT_SIZE   = 32
@@ -58,6 +71,8 @@ local GameView = FrameContainer:extend{
     on_close   = nil,
     font_size  = 20,    -- transcript font size; overridden by the caller
     settings   = nil,   -- LuaSettings, so the font-size menu can persist changes
+    save_dir   = nil,   -- per-game directory for save slots + autosave
+    auto_restore = false, -- restore the autosave once the intro settles
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -79,6 +94,9 @@ function GameView:init()
     -- Monospace face so dfrotz's column wrapping (the -w value) lines up exactly
     -- with the rendered width; see main.lua _startGame for the cols derivation.
     self._face            = Font:getFace("infont", self.font_size)
+    self._autosave_path   = self.save_dir and (self.save_dir .. "/autosave.qzl") or nil
+    -- Restore the autosave on the first settled turn (the intro), see _finishTurn.
+    self._auto_restore_pending = self.auto_restore and self._autosave_path ~= nil
     self:_build()
 end
 
@@ -393,6 +411,25 @@ end
 -- output into physical lines (dfrotz already wrapped them to the -w width) and
 -- reveal the first page.  Remaining lines are paginated on tap / key press.
 function GameView:_finishTurn()
+    -- Feature #4: the first settled turn is the intro.  If we are resuming,
+    -- discard it and restore the autosave instead, replacing _turn_buf with the
+    -- restored location text so it paginates normally below.  (The poller is
+    -- stopped here, so the synchronous restore won't race the async reader.)
+    if self._auto_restore_pending then
+        self._auto_restore_pending = false
+        local ok, text = false, nil
+        if self.session then
+            ok, text = self.session:restore_game(self._autosave_path)
+        end
+        if ok then
+            self:_pushLine(_("[Resumed from autosave]"))
+            self._turn_buf = text or ""
+        else
+            self:_pushLine(_("[Could not resume; starting fresh]"))
+            -- _turn_buf still holds the intro, so the fresh game shows instead.
+        end
+    end
+
     local buf = self._turn_buf
     self._turn_buf = ""
     buf = buf:gsub("\r", "")
@@ -524,19 +561,19 @@ function GameView:showMenu()
             end,
         }},
     }
-    if self.session then
+    if self.session and self.save_dir then
         table.insert(buttons, {{
             text     = _("Save game"),
             callback = function()
                 UIManager:close(menu)
-                self:_issueCommand("SAVE")
+                self:_showSaveSlots("save")
             end,
         }})
         table.insert(buttons, {{
             text     = _("Restore game"),
             callback = function()
                 UIManager:close(menu)
-                self:_issueCommand("RESTORE")
+                self:_showSaveSlots("restore")
             end,
         }})
     end
@@ -594,15 +631,103 @@ function GameView:_showFontSizeDialog()
     })
 end
 
-function GameView:_issueCommand(command)
-    if self._polling then return end
+-- ── Save / restore slots ────────────────────────────────────────────────────────
+
+function GameView:_slotPath(name)
+    return self.save_dir .. "/" .. name .. ".qzl"
+end
+
+-- Returns a "YYYY-MM-DD HH:MM" timestamp for an occupied slot, or nil if empty.
+function GameView:_slotStatus(name)
+    local mtime = lfs.attributes(self:_slotPath(name), "modification")
+    return mtime and os.date("%Y-%m-%d %H:%M", mtime) or nil
+end
+
+-- Append one line to the transcript without refreshing the display.
+function GameView:_pushLine(text)
     if self.transcript ~= "" then
         self.transcript = self.transcript .. "\n"
     end
-    self.transcript = self.transcript .. "> " .. command
-    self.session:send_input(command)
-    self:_startPolling()
+    self.transcript = self.transcript .. text
+end
+
+-- Append a one-line system message (e.g. "[Saved to Slot 1]") and show it.
+function GameView:_appendSystem(text)
+    self:_pushLine(text)
     self:_refreshDisplay()
+end
+
+-- Slot picker for both Save and Restore.  modal = true so it sits above the OSK
+-- (which is itself a modal); empty slots are disabled in restore mode.
+function GameView:_showSaveSlots(mode)
+    if not (self.session and self.save_dir) then return end
+    -- Save/restore drives dfrotz's stdin synchronously; don't start it while a
+    -- turn is still streaming output (the poller owns the stream until it settles).
+    if self._polling or self._awaiting_more then
+        UIManager:show(InfoMessage:new{
+            text = _("Please wait for the game to finish responding."),
+        })
+        return
+    end
+    local picker
+    local buttons = {}
+    for _i, slot in ipairs(SAVE_SLOTS) do
+        local status   = self:_slotStatus(slot.name)
+        local occupied = status ~= nil
+        table.insert(buttons, {{
+            text     = slot.label .. "    " .. (status or _("(empty)")),
+            enabled  = not (mode == "restore" and not occupied),
+            callback = function()
+                UIManager:close(picker)
+                if mode == "save" then
+                    self:_saveToSlot(slot, occupied)
+                else
+                    self:_restoreFromSlot(slot)
+                end
+            end,
+        }})
+    end
+    picker = ButtonDialog:new{
+        modal       = true,
+        title       = mode == "save" and _("Save game") or _("Restore game"),
+        title_align = "center",
+        buttons     = buttons,
+    }
+    UIManager:show(picker)
+end
+
+-- Confirm before clobbering an occupied manual slot (autosave is fair game).
+function GameView:_saveToSlot(slot, occupied)
+    if occupied and slot.name ~= "autosave" then
+        UIManager:show(ConfirmBox:new{
+            modal       = true,
+            text        = T(_("Overwrite %1?"), slot.label),
+            ok_text     = _("Overwrite"),
+            ok_callback = function() self:_doSave(slot) end,
+        })
+    else
+        self:_doSave(slot)
+    end
+end
+
+function GameView:_doSave(slot)
+    if not self.session then return end
+    local ok = self.session:save_game(self:_slotPath(slot.name))
+    self:_appendSystem(ok and T(_("[Saved to %1]"), slot.label)
+                          or  T(_("[Save to %1 failed]"), slot.label))
+end
+
+function GameView:_restoreFromSlot(slot)
+    if not self.session then return end
+    local ok, text = self.session:restore_game(self:_slotPath(slot.name))
+    if not ok then
+        self:_appendSystem(T(_("[Restore of %1 failed]"), slot.label))
+        return
+    end
+    -- Show the marker, then paginate whatever location text dfrotz printed.
+    self:_pushLine(T(_("[Restored %1]"), slot.label))
+    self._turn_buf = text or ""
+    self:_finishTurn()
 end
 
 -- ── Game-ended handler ─────────────────────────────────────────────────────────
@@ -624,6 +749,11 @@ function GameView:onClose()
         self._tap_overlay = nil
     end
     if self.session then
+        -- Feature #4: autosave before quitting, so the next launch can resume.
+        -- Only if the game is still running (a finished game can't be saved).
+        if self._autosave_path and self.session:is_alive() then
+            self.session:save_game(self._autosave_path)
+        end
         self.session:terminate()
         self.session = nil
     end
