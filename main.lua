@@ -9,7 +9,6 @@ local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Font            = require("ui/font")
-local ffiUtil         = require("ffi/util")
 local logger          = require("logger")
 local util            = require("util")
 local _               = require("gettext")
@@ -27,6 +26,7 @@ local EXTENSIONS = {
 }
 
 local DEFAULT_FONT_SIZE = 20
+local MAX_RECENT        = 10
 
 local Frotz = WidgetContainer:extend{
     name        = "frotz",
@@ -74,15 +74,79 @@ function Frotz:_buildMenuItems()
         callback = function() self:_openFileBrowser() end,
     })
 
-    local last = self._settings:readSetting("last_game")
-    if last then
-        local _dir, fname = util.splitFilePathName(last)
+    local recent = self:_buildRecentSubmenu()
+    if #recent > 0 then
         table.insert(items, {
-            text     = ffiUtil.template(_("Resume: %1"), fname),
-            callback = function() self:_startGame(last) end,
+            text           = _("Recent games"),
+            sub_item_table = recent,
         })
     end
 
+    return items
+end
+
+-- ── Recent games library ────────────────────────────────────────────────────────
+
+-- Most-recent-first list of game paths.  Seeds from the old single "last_game"
+-- setting on first run, so existing users keep their last game.
+function Frotz:_recentGames()
+    self:_loadSettings()
+    local list = self._settings:readSetting("recent_games")
+    if not list then
+        list = {}
+        local last = self._settings:readSetting("last_game")
+        if last then table.insert(list, last) end
+    end
+    return list
+end
+
+function Frotz:_pushRecent(gamefile)
+    local list = self:_recentGames()
+    for i = #list, 1, -1 do
+        if list[i] == gamefile then table.remove(list, i) end
+    end
+    table.insert(list, 1, gamefile)
+    while #list > MAX_RECENT do table.remove(list) end
+    self:_saveSetting("recent_games", list)
+end
+
+-- Build the "Recent games" sub-menu, pruning entries whose file no longer
+-- exists and flagging those that have an autosave to resume.
+function Frotz:_buildRecentSubmenu()
+    local list  = self:_recentGames()
+    local kept  = {}
+    local items = {}
+    for _idx, path in ipairs(list) do
+        if lfs.attributes(path, "mode") == "file" then
+            table.insert(kept, path)
+            local _dir, fname = util.splitFilePathName(path)
+            table.insert(items, {
+                text      = fname,
+                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
+                            and _("saved") or nil,
+                callback  = function() self:_startGame(path) end,
+            })
+        end
+    end
+    if #kept ~= #list then
+        self:_saveSetting("recent_games", kept)
+    end
+    if #items > 0 then
+        table.insert(items, {
+            text     = _("Clear recent games"),
+            separator = true,
+            keep_menu_open = true,
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text        = _("Clear the recent games list?"),
+                    ok_text     = _("Clear"),
+                    ok_callback = function()
+                        self:_saveSetting("recent_games", {})
+                    end,
+                })
+            end,
+        })
+    end
     return items
 end
 
@@ -118,6 +182,18 @@ end
 
 -- ── Game startup ──────────────────────────────────────────────────────────────
 
+-- Per-game save directory: DataDir/frotz_saves/<sanitised story name>/.
+function Frotz:_saveDirFor(gamefile)
+    local _dir, fname = util.splitFilePathName(gamefile)
+    local stem        = fname:gsub("%.[^.]+$", "")
+    local safe_name   = stem:gsub("[^%w%-_]", "_")
+    return DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
+end
+
+function Frotz:_autosavePathFor(gamefile)
+    return self:_saveDirFor(gamefile) .. "/autosave.qzl"
+end
+
 function Frotz:_startGame(gamefile)
     local Session  = require("session")
     local GameView = require("gameview")
@@ -145,16 +221,13 @@ function Frotz:_startGame(gamefile)
     -- the top.  The UI paginates this output itself (see gameview.lua).
     local rows = 200
 
-    self:_saveSetting("last_game", gamefile)
+    self:_pushRecent(gamefile)
 
-    -- Per-game save directory: DataDir/frotz_saves/<sanitised story name>/.
-    -- Holds the numbered slots and the autosave written on close.
-    local _dir, fname = util.splitFilePathName(gamefile)
-    local stem        = fname:gsub("%.[^.]+$", "")
-    local safe_name   = stem:gsub("[^%w%-_]", "_")
-    local save_dir    = DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
+    -- Per-game save directory holds the numbered slots and the autosave.
+    local _dir, fname   = util.splitFilePathName(gamefile)
+    local save_dir      = self:_saveDirFor(gamefile)
     util.makePath(save_dir)
-    local autosave_path = save_dir .. "/autosave.qzl"
+    local autosave_path = self:_autosavePathFor(gamefile)
 
     local function launch(auto_restore)
         local ok, result = pcall(Session.new, Session, DFROTZ_BIN, gamefile, cols, rows)
