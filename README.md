@@ -8,6 +8,17 @@ It uses the [Frotz](https://www.ifwiki.org/Frotz) interpreter to parse [Z-machin
 
 The plugin is quite simple and text only. For a more complete interactive fiction interpreter use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle. It has graphics support, nicer rendering and supports most IF game formats. For other systems, check the relevant forums.
 
+## Features
+
+- Should work on most platforms where Koreader is available
+- Z-machine games support (the most used format for interactive fiction)
+- Simple save and restore mechanism (per game and with slots), including autosave at closing
+- Game history, so you can resume the last played games
+- Possibility to hide on screen keyboard when using it with external keyboard
+- Font size setting
+
+## Installation and running
+
 To install, copy the contents of the release to the `koreader/plugins` folder.
 
 To run, click on *Interactive fiction* in the *Tools* menu.
