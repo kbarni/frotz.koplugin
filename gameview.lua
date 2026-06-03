@@ -348,7 +348,6 @@ function GameView:onSubmit()
 
     local cmd = self._input_widget:getText() or ""
     cmd = cmd:match("^%s*(.-)%s*$") or ""
-    if cmd == "" then return end
 
     if self.transcript ~= "" then
         self.transcript = self.transcript .. "\n"
