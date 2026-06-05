@@ -14,6 +14,7 @@ The plugin is quite simple and text only. For a more complete interactive fictio
 - Z-machine games support (the most used format for interactive fiction)
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
 - Game history, so you can resume the last played games
+- Word lookup in dictionaries or Wikipedia, just like in Koreader
 - Possibility to hide on screen keyboard when using it with external keyboard
 - Font size setting
 
