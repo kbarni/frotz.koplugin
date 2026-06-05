@@ -6,6 +6,7 @@ local Device           = require("device")
 local Font             = require("ui/font")
 local FrameContainer   = require("ui/widget/container/framecontainer")
 local Geom             = require("ui/geometry")
+local GestureRange     = require("ui/gesturerange")
 local HorizontalGroup  = require("ui/widget/horizontalgroup")
 local InfoMessage      = require("ui/widget/infomessage")
 local InputContainer   = require("ui/widget/container/inputcontainer")
@@ -73,6 +74,7 @@ local GameView = FrameContainer:extend{
     settings   = nil,   -- LuaSettings, so the font-size menu can persist changes
     save_dir   = nil,   -- per-game directory for save slots + autosave
     auto_restore = false, -- restore the autosave once the intro settles
+    ui         = nil,   -- hosting FileManager/ReaderUI, for dictionary lookup
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -102,6 +104,7 @@ end
 
 -- Call this instead of UIManager:show(self) so polling starts at the right time.
 function GameView:show()
+    self:_installDictModalHook()
     UIManager:show(self)
     if self.session then
         self:_startPolling()
@@ -315,7 +318,7 @@ function GameView:_buildScrollWidget()
     local text = self.transcript
     text = text:gsub("\r", "")
     text = text:gsub("\n>[ \t]*$", "")
-    return ScrollTextWidget:new{
+    local stw = ScrollTextWidget:new{
         text          = text,
         face          = self._face,
         width         = self._scroll_w,
@@ -323,6 +326,82 @@ function GameView:_buildScrollWidget()
         scroll_by_pan = true,
         dialog        = self,
     }
+    self:_enableWordLookup(stw)
+    return stw
+end
+
+-- Wire "hold on a word" in the transcript to a dictionary lookup.  The inner
+-- TextBoxWidget is itself an InputContainer with paint-accurate dimen, so we
+-- register the gesture directly on it: "hold" never matches any of GameView's
+-- ancestors, so it propagates down (children-first) and lands here.  A fresh
+-- ScrollTextWidget is built on every refresh, hence we (re)attach here.
+--
+-- We use the HoldStartText/HoldPanText/HoldReleaseText trio (the same one
+-- DictQuickLookup uses), NOT the single-word onHoldWord: onHoldWord relies on
+-- the legacy char_width table, which is nil under the default xtext renderer.
+-- A stationary hold selects the whole word via libunibreak word boundaries; a
+-- hold-and-drag extends the selection.  highlight_text_selection is left at its
+-- default (false), so no selection rectangles are drawn (nothing to clear) —
+-- the selected text is still recovered from the highlight indices on release.
+function GameView:_enableWordLookup(stw)
+    if not (self.ui and self.ui.dictionary) then return end  -- no dictionary host
+    if not Device:isTouchDevice() then return end            -- no hold gesture
+    local tw = stw.text_widget
+    local range = function() return tw.dimen end
+    local hold_pan_rate = G_reader_settings:readSetting("hold_pan_rate")
+                          or (Screen.low_pan_rate and 5.0 or 30.0)
+    tw.ges_events = tw.ges_events or {}
+    tw.ges_events.HoldStartText = {
+        GestureRange:new{ ges = "hold", range = range },
+    }
+    tw.ges_events.HoldPanText = {
+        GestureRange:new{ ges = "hold_pan", range = range, rate = hold_pan_rate },
+    }
+    tw.ges_events.HoldReleaseText = {
+        GestureRange:new{ ges = "hold_release", range = range },
+        -- onHoldReleaseText invokes this with the selected text.
+        args = function(text) self:_lookupWord(text) end,
+    }
+end
+
+-- Look the held word up in the user's installed StarDict dictionaries via the
+-- host's ReaderDictionary module.  is_sane = false lets cleanSelection() strip
+-- the punctuation that IF transcripts love to attach ("door." , "(north)").
+-- The DictQuickLookup window shows on top of the game view and returns to it.
+function GameView:_lookupWord(word)
+    if not word or word == "" then return end
+    if not (self.ui and self.ui.dictionary) then return end
+    self.ui.dictionary:onLookupWord(word, false)
+end
+
+-- The dictionary popup (DictQuickLookup) is created and shown by KOReader's
+-- ReaderDictionary, and the sdcv lookup yields (Trapper coroutine), so the
+-- window is shown asynchronously — we can't set fields on it after onLookupWord
+-- returns.  It is created non-modal, so UIManager:show slots it *below* our
+-- on-screen keyboard (itself a modal), where the keyboard covers it and steals
+-- its taps — the same trap the save/font dialogs avoid with modal=true.  We
+-- can't patch core, so for the game view's lifetime we wrap UIManager:show to
+-- mark any DictQuickLookup it shows as modal, lifting it above the keyboard.
+-- Restored in onClose (and harmless if it ever leaks: it only flags dict popups).
+function GameView:_installDictModalHook()
+    if self._orig_uimgr_show then return end
+    if not (self.ui and self.ui.dictionary) then return end
+    local DictQuickLookup = require("ui/widget/dictquicklookup")
+    local orig = UIManager.show
+    self._orig_uimgr_show = orig
+    UIManager.show = function(uimgr, widget, ...)
+        if widget and getmetatable(widget) == DictQuickLookup then
+            widget.modal = true
+        end
+        return orig(uimgr, widget, ...)
+    end
+end
+
+function GameView:_removeDictModalHook()
+    if self._orig_uimgr_show then
+        UIManager.show = self._orig_uimgr_show
+        self._orig_uimgr_show = nil
+    end
 end
 
 function GameView:_refreshDisplay()
@@ -743,6 +822,7 @@ end
 
 function GameView:onClose()
     self._polling = false
+    self:_removeDictModalHook()
     if self._tap_overlay then
         UIManager:close(self._tap_overlay)
         self._tap_overlay = nil

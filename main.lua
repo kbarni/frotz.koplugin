@@ -246,6 +246,10 @@ function Frotz:_startGame(gamefile)
             settings     = self._settings,
             save_dir     = save_dir,
             auto_restore = auto_restore,
+            -- The hosting FileManager/ReaderUI both register a "dictionary"
+            -- module; passing the ui through lets the transcript offer
+            -- hold-to-look-up against the user's installed dictionaries.
+            ui           = self.ui,
             on_close     = function()
                 self._game_view = nil
             end,
