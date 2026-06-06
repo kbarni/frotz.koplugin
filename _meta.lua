@@ -2,5 +2,5 @@ local _ = require("gettext")
 return {
     name = "frotz",
     fullname = _("Interactive Fiction"),
-    description = _("Play Z-Machine interactive fiction games on your e-reader."),
+    description = _("Play interactive fiction games (Z-machine and Glulx) on your e-reader."),
 }
