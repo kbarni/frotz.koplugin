@@ -1,31 +1,35 @@
-local PathChooser      = require("ui/widget/pathchooser")
-local SpinWidget       = require("ui/widget/spinwidget")
-local UIManager        = require("ui/uimanager")
-local WidgetContainer  = require("ui/widget/container/widgetcontainer")
-local lfs              = require("libs/libkoreader-lfs")
-local ffiUtil          = require("ffi/util")
-local logger           = require("logger")
-local util             = require("util")
-local _                = require("gettext")
+local ConfirmBox      = require("ui/widget/confirmbox")
+local DataStorage     = require("datastorage")
+local InfoMessage     = require("ui/widget/infomessage")
+local LuaSettings     = require("luasettings")
+local lfs             = require("libs/libkoreader-lfs")
+local PathChooser     = require("ui/widget/pathchooser")
+local RenderText      = require("ui/rendertext")
+local Size            = require("ui/size")
+local UIManager       = require("ui/uimanager")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Font            = require("ui/font")
+local logger          = require("logger")
+local util            = require("util")
+local _               = require("gettext")
+local T               = require("ffi/util").template
+local Screen          = require("device").screen
 
--- Resolve the plugin directory from this file's path so we can locate the
--- interpreter binaries regardless of install location.
-local _plugin_dir = debug.getinfo(1, "S").source:match("@(.+)/[^/]+$") or "."
-
-local GameView = require("gameview")
-local Session  = require("session")
-local Settings = require("settings")
-local Resolver = require("engines/resolver")
-
--- JSON codec for the engine. KOReader bundles rapidjson (gate confirmed on the
--- emulator 2026-06-06); the headless harness injects its own codec instead.
+local Resolver  = require("engines/resolver")
 local rapidjson = require("rapidjson")
 
--- ── Binary lookup ──────────────────────────────────────────────────────────────
+-- Locate the plugin directory so we can find the interpreter binaries regardless
+-- of where KOReader is installed.
+local _plugin_dir = debug.getinfo(1, "S").source:match("@(.+)/[^/]+$") or "."
+
+local DEFAULT_FONT_SIZE = 20
+local MAX_RECENT        = 10
+
+-- ── Interpreter binary lookup ────────────────────────────────────────────────────
 -- Prefer a per-arch binary under binaries/<arch>/, fall back to bin/ (the host
--- spike build used by the emulator). Arch detection is best-effort here and is
--- finalized alongside the cross-builds in Phase 5; the file-existence scan makes
--- it self-correcting when only one arch is actually present.
+-- spike build used by the emulator). Arch detection is best-effort and finalized
+-- with the cross-builds in Phase 5; the file-existence scan is self-correcting
+-- when only one arch is actually present.
 
 local function detect_arch()
     local m
@@ -34,18 +38,12 @@ local function detect_arch()
     m = m or ""
     if m:match("x86_64") or m:match("amd64") then return "x86_64" end
     if m:match("aarch64") then return "aarch64" end
-    if m:match("arm") then return "armhf" end   -- soft/hard refined in Phase 5
+    if m:match("arm") then return "armhf" end
     return "x86_64"
 end
 
 local _arch = detect_arch()
 
-local function file_exists(path)
-    return lfs.attributes(path, "mode") ~= nil
-end
-
--- Return an absolute path to the VM binary, trying the detected arch first, then
--- any other built arch, then the bin/ spike build. Returns nil if none found.
 local function binary_for(vm)
     local candidates = {
         _plugin_dir .. "/binaries/" .. _arch .. "/" .. vm,
@@ -55,34 +53,39 @@ local function binary_for(vm)
         _plugin_dir .. "/bin/" .. vm,
     }
     for _, path in ipairs(candidates) do
-        if file_exists(path) then return path end
+        if lfs.attributes(path, "mode") then return path end
     end
     return nil
 end
 
--- ── Plugin ──────────────────────────────────────────────────────────────────────
-
-local FrotzPlugin = WidgetContainer:extend{
+local Frotz = WidgetContainer:extend{
     name        = "frotz",
     is_doc_only = false,
     _settings   = nil,
-    _session    = nil,
-    _game_view  = nil,
 }
 
-function FrotzPlugin:init()
+function Frotz:init()
     self.ui.menu:registerToMainMenu(self)
 end
 
-function FrotzPlugin:_loadSettings()
+-- ── Persistent settings (last directory + recent games + font size) ─────────────
+
+function Frotz:_loadSettings()
     if not self._settings then
-        self._settings = Settings:load()
+        self._settings = LuaSettings:open(
+            DataStorage:getSettingsDir() .. "/frotz.lua")
     end
 end
 
--- ── Menu integration ──────────────────────────────────────────────────────────
+function Frotz:_saveSetting(key, value)
+    self:_loadSettings()
+    self._settings:saveSetting(key, value)
+    self._settings:flush()
+end
 
-function FrotzPlugin:addToMainMenu(menu_items)
+-- ── Menu ──────────────────────────────────────────────────────────────────────
+
+function Frotz:addToMainMenu(menu_items)
     menu_items.frotz = {
         text         = _("Interactive Fiction"),
         sorting_hint = "tools",
@@ -93,7 +96,7 @@ function FrotzPlugin:addToMainMenu(menu_items)
     }
 end
 
-function FrotzPlugin:_buildMenuItems()
+function Frotz:_buildMenuItems()
     local items = {}
 
     table.insert(items, {
@@ -101,76 +104,102 @@ function FrotzPlugin:_buildMenuItems()
         callback = function() self:_openFileBrowser() end,
     })
 
-    if self._settings.last_game then
-        local _dir, fname = util.splitFilePathName(self._settings.last_game)
+    local recent = self:_buildRecentSubmenu()
+    if #recent > 0 then
         table.insert(items, {
-            text     = ffiUtil.template(_("Resume: %1"), fname),
-            callback = function() self:_startGame(self._settings.last_game) end,
+            text           = _("Recent games"),
+            sub_item_table = recent,
         })
     end
-
-    table.insert(items, {
-        text            = _("Settings"),
-        separator       = true,
-        sub_item_table  = self:_buildSettingsItems(),
-    })
 
     return items
 end
 
-function FrotzPlugin:_buildSettingsItems()
-    return {
-        {
-            text_func = function()
-                return ffiUtil.template(_("Font size: %1"), self._settings.font_size)
-            end,
+-- ── Recent games library ────────────────────────────────────────────────────────
+
+function Frotz:_recentGames()
+    self:_loadSettings()
+    local list = self._settings:readSetting("recent_games")
+    if not list then
+        list = {}
+        local last = self._settings:readSetting("last_game")
+        if last then table.insert(list, last) end
+    end
+    return list
+end
+
+function Frotz:_pushRecent(gamefile)
+    local list = self:_recentGames()
+    for i = #list, 1, -1 do
+        if list[i] == gamefile then table.remove(list, i) end
+    end
+    table.insert(list, 1, gamefile)
+    while #list > MAX_RECENT do table.remove(list) end
+    self:_saveSetting("recent_games", list)
+end
+
+function Frotz:_buildRecentSubmenu()
+    local list  = self:_recentGames()
+    local kept  = {}
+    local items = {}
+    for _idx, path in ipairs(list) do
+        if lfs.attributes(path, "mode") == "file" then
+            table.insert(kept, path)
+            local _dir, fname = util.splitFilePathName(path)
+            table.insert(items, {
+                text      = fname,
+                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
+                            and _("saved") or nil,
+                callback  = function() self:_startGame(path) end,
+            })
+        end
+    end
+    if #kept ~= #list then
+        self:_saveSetting("recent_games", kept)
+    end
+    if #items > 0 then
+        table.insert(items, {
+            text     = _("Clear recent games"),
+            separator = true,
             keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                UIManager:show(SpinWidget:new{
-                    value         = self._settings.font_size,
-                    value_min     = 10,
-                    value_max     = 30,
-                    default_value = 18,
-                    title_text    = _("Font size"),
-                    callback      = function(spin)
-                        self._settings.font_size = spin.value
-                        Settings:save(self._settings)
-                        if touchmenu_instance then
-                            touchmenu_instance:updateItems()
-                        end
+            callback = function()
+                UIManager:show(ConfirmBox:new{
+                    text        = _("Clear the recent games list?"),
+                    ok_text     = _("Clear"),
+                    ok_callback = function()
+                        self:_saveSetting("recent_games", {})
                     end,
                 })
             end,
-        },
-        {
-            text = _("Show keyboard on start"),
-            checked_func = function()
-                return self._settings.show_keyboard
-            end,
-            callback = function()
-                self._settings.show_keyboard = not self._settings.show_keyboard
-                Settings:save(self._settings)
-            end,
-        },
-    }
+        })
+    end
+    return items
+end
+
+-- ── Display settings ────────────────────────────────────────────────────────────
+
+function Frotz:_fontSize()
+    self:_loadSettings()
+    return self._settings:readSetting("font_size") or DEFAULT_FONT_SIZE
 end
 
 -- ── File browser ──────────────────────────────────────────────────────────────
 
-function FrotzPlugin:_openFileBrowser()
+function Frotz:_openFileBrowser()
     self:_loadSettings()
+    local start_dir = self._settings:readSetting("game_directory")
+                      or (DataStorage:getDataDir() .. "/ifgames")
     UIManager:show(PathChooser:new{
         select_directory = false,
-        path             = self._settings.game_directory,
-        -- Show both Z-machine and Glulx games (PathChooser passes each filename).
-        filter_func = function(filename)
+        path             = start_dir,
+        -- Show both Z-machine and Glulx games (resolved by extension).
+        filter_func      = function(filename)
             return Resolver.is_supported(filename)
         end,
         onConfirm = function(file_path)
             local dir = file_path:match("(.*)/")
             if dir and dir ~= "" then
-                self._settings.game_directory = dir
-                Settings:save(self._settings)
+                self:_saveSetting("game_directory", dir)
             end
             self:_startGame(file_path)
         end,
@@ -179,73 +208,111 @@ end
 
 -- ── Game startup ──────────────────────────────────────────────────────────────
 
-function FrotzPlugin:_showError(text)
-    local InfoMessage = require("ui/widget/infomessage")
-    UIManager:show(InfoMessage:new{ text = text })
-    logger.err("FrotzPlugin:", text)
+-- Per-game save directory: DataDir/frotz_saves/<sanitised story name>/.
+function Frotz:_saveDirFor(gamefile)
+    local _dir, fname = util.splitFilePathName(gamefile)
+    local stem        = fname:gsub("%.[^.]+$", "")
+    local safe_name   = stem:gsub("[^%w%-_]", "_")
+    return DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
 end
 
-function FrotzPlugin:_startGame(gamefile)
-    self:_loadSettings()
+function Frotz:_autosavePathFor(gamefile)
+    return self:_saveDirFor(gamefile) .. "/autosave.qzl"
+end
+
+function Frotz:_startGame(gamefile)
+    local Session  = require("session")
+    local GameView = require("gameview")
+    local RemGlk   = require("engines/remglk")
 
     -- Pick the interpreter from the extension, then find its binary.
     local vm = Resolver.vm_for(gamefile)
     if not vm then
-        self:_showError(_("Unsupported game format: ") .. tostring(gamefile))
+        UIManager:show(InfoMessage:new{
+            text = _("Unsupported game format: ") .. tostring(gamefile),
+        })
         return
     end
     local binary = binary_for(vm)
     if not binary then
-        self:_showError(ffiUtil.template(
-            _("Interpreter binary not found: %1 (arch %2)"), vm, _arch))
+        UIManager:show(InfoMessage:new{
+            text = T(_("Interpreter binary not found: %1 (arch %2)"), vm, _arch),
+        })
         return
     end
 
-    -- Character grid advertised to the VM via the JSON init. We keep the buffer
-    -- window tall so the VM never paginates — paging is the UI's job (Phase 3).
-    local cols = 80
-    local rows = 50
+    local font_size = self:_fontSize()
 
-    self._settings.last_game = gamefile
-    Settings:save(self._settings)
+    -- cols is the monospace column width. GameView renders the transcript in a
+    -- fixed-width face ("infont") and word-wraps the story to `cols`, so one glyph
+    -- advance is constant and wrapping lines up exactly with the rendered width.
+    -- usable is the TextBoxWidget's inner width: ScrollTextWidget reserves
+    -- scroll_bar_width (6) + text_scroll_span (12) on the right, and GameView
+    -- pads by Size.padding.large on each side.
+    local face            = Font:getFace("infont", font_size)
+    local advance         = RenderText:sizeUtf8Text(0, Screen:getWidth(), face, "0").x
+    local scroll_overhead = Screen:scaleBySize(6) + Screen:scaleBySize(12)
+    local usable          = Screen:getWidth() - 2 * Size.padding.large - scroll_overhead
+    local cols            = math.max(20, math.floor(usable / advance))
+    -- rows is advertised tall so the VM never paginates; the UI owns paging.
+    local rows = 200
 
-    -- Spawn the VM subprocess, then wrap it in the RemGlk JSON engine.
-    local ok, transport = pcall(Session.new, Session, binary, gamefile)
-    if not ok then
-        self:_showError(_("Failed to start interpreter:\n") .. tostring(transport))
-        return
+    self:_pushRecent(gamefile)
+
+    -- Per-game save directory holds the numbered slots and the autosave.
+    local _dir, fname   = util.splitFilePathName(gamefile)
+    local save_dir      = self:_saveDirFor(gamefile)
+    util.makePath(save_dir)
+    local autosave_path = self:_autosavePathFor(gamefile)
+
+    local function launch(auto_restore)
+        local ok, transport = pcall(Session.new, Session, binary, gamefile)
+        if not ok then
+            UIManager:show(InfoMessage:new{
+                text = _("Failed to start interpreter:\n") .. tostring(transport),
+            })
+            logger.err("Frotz: session error:", transport)
+            return
+        end
+        local engine = RemGlk:new(transport, rapidjson, cols, rows)
+
+        local game_view = GameView:new{
+            engine       = engine,
+            game_title   = fname,
+            font_size    = font_size,
+            cols         = cols,
+            settings     = self._settings,
+            save_dir     = save_dir,
+            auto_restore = auto_restore,
+            -- The hosting FileManager/ReaderUI register a "dictionary" module;
+            -- passing ui through enables hold-to-look-up in the transcript.
+            ui           = self.ui,
+            on_close     = function()
+                self._game_view = nil
+            end,
+        }
+        self._game_view = game_view
+        game_view:show()
     end
-    local engine = require("engines/remglk"):new(transport, rapidjson, cols, rows)
 
-    self._session = transport
-    local _, fname = util.splitFilePathName(gamefile)
-
-    self._game_view = GameView:new{
-        engine     = engine,
-        settings   = self._settings,
-        game_title = fname,
-        on_close   = function()
-            self._session   = nil
-            self._game_view = nil
-        end,
-    }
-    self._game_view:show()
+    -- Offer to pick up from the autosave if one exists.
+    if lfs.attributes(autosave_path, "mode") then
+        UIManager:show(ConfirmBox:new{
+            text            = _("Resume where you left off?"),
+            ok_text         = _("Resume"),
+            cancel_text     = _("Start over"),
+            ok_callback     = function() launch(true) end,
+            cancel_callback = function() launch(false) end,
+        })
+    else
+        launch(false)
+    end
 end
 
--- ── Suspend / resume ──────────────────────────────────────────────────────────
-
-function FrotzPlugin:onSuspend()
-    -- The VM keeps running; its state lives in the child process.
-end
-
-function FrotzPlugin:onResume()
-    -- Nothing needed — the game view is still on screen.
-end
-
-function FrotzPlugin:onFlushSettings()
+function Frotz:onFlushSettings()
     if self._settings then
-        Settings:save(self._settings)
+        self._settings:flush()
     end
 end
 
-return FrotzPlugin
+return Frotz

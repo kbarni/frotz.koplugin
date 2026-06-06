@@ -191,27 +191,31 @@ function RemGlk:_normalize(obj)
     end
     update.status = self._status
 
-    -- Turn boundary: the input request. line/char/specialinput(fileref).
+    -- Track the update's gen as the default to echo (a specialresponse uses this;
+    -- a line/char input below overrides it with the input entry's own gen).
+    if obj.gen ~= nil then self._gen = obj.gen end
+
+    -- Turn boundary: the input request. line / char come in the input[] array.
     for _, inp in ipairs(obj.input or {}) do
         if inp.type == "line" or inp.type == "char" then
             self._gen = inp.gen
             self._input_window = inp.id
             update.input = { kind = inp.type, window = inp.id, gen = inp.gen, maxlen = inp.maxlen }
             break
-        elseif inp.type == "specialinput" then
-            local si = inp.specialinput or {}
-            if si.type == "fileref_prompt" then
-                self._gen = inp.gen
-                self._input_window = inp.id
-                update.fileref = {
-                    purpose  = si.filetype,    -- "save" / "restore" / "transcript" / ...
-                    filemode = si.filemode,    -- "read" / "write" / "readwrite"
-                    gen      = inp.gen,
-                    window   = inp.id,
-                }
-            end
-            break
         end
+    end
+
+    -- A fileref prompt (save / restore / transcript) arrives as a TOP-LEVEL
+    -- `specialinput` field with an empty input[] — verified against real bocfel
+    -- output (the plan's §4 sketch nested it inside input[]; reality differs).
+    -- The response echoes the update's gen and carries no window.
+    local si = obj.specialinput
+    if si and si.type == "fileref_prompt" then
+        update.fileref = {
+            purpose  = si.filetype,    -- "save" / "restore" / "transcript" / ...
+            filemode = si.filemode,    -- "read" / "write" / "readwrite"
+            gen      = obj.gen,
+        }
     end
 
     if obj.exit == true then update.exited = true end
