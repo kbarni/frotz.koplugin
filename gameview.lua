@@ -546,12 +546,13 @@ end
 -- show its location text instead. Then split the (already wrapped) story into
 -- physical lines and reveal the first page; the rest paginates on tap / key.
 function GameView:_finishTurn()
-    if self._auto_restore_pending then
+    -- Autorestore only works via the game's "restore" verb, which needs a line
+    -- prompt. Glulx games (e.g. Coloratura) open on char input for their intro,
+    -- so we defer the restore until the first line prompt rather than send a
+    -- verb at a char prompt (which hangs the VM). The flag stays set until then.
+    if self._auto_restore_pending and self._input_kind == "line" then
         self._auto_restore_pending = false
-        local ok, text = false, nil
-        if self.engine then
-            ok, text = self:_engineRestore(self._autosave_path)
-        end
+        local ok, text = self:_engineRestore(self._autosave_path)
         if ok then
             self:_pushLine(_("[Resumed from autosave]"))
             self._turn_buf = text or ""
@@ -773,6 +774,14 @@ function GameView:_showSaveSlots(mode)
         })
         return
     end
+    -- Save/restore go through the game's verbs, which only work at a command
+    -- (line) prompt — not while the game is waiting for a single key.
+    if self._input_kind ~= "line" then
+        UIManager:show(InfoMessage:new{
+            text = _("Save and restore are only available at a command prompt."),
+        })
+        return
+    end
     local picker
     local buttons = {}
     for _i, slot in ipairs(SAVE_SLOTS) do
@@ -864,6 +873,9 @@ end
 
 function GameView:_engineSave(path)
     if not self.engine then return false end
+    -- The "save" verb requires a line prompt; sending it at a char prompt hangs
+    -- the VM. Refuse rather than desync (caller treats false as "save failed").
+    if self._input_kind ~= "line" then return false end
     self.engine:send_line(self._input_window, "save")
     local u = self:_waitUpdate(5)
     local guard = 0
@@ -885,6 +897,8 @@ end
 function GameView:_engineRestore(path)
     if not self.engine then return false, nil end
     if not lfs.attributes(path, "mode") then return false, nil end
+    -- Same line-prompt requirement as _engineSave.
+    if self._input_kind ~= "line" then return false, nil end
     self.engine:send_line(self._input_window, "restore")
     local u = self:_waitUpdate(5)
     local guard = 0
