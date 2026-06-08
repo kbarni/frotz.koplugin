@@ -193,7 +193,10 @@ function Frotz:_openFileBrowser()
         select_directory = false,
         path             = start_dir,
         -- Show both Z-machine and Glulx games (resolved by extension).
-        filter_func      = function(filename)
+        -- KOReader's FileChooser reads this as `file_filter` (not `filter_func`),
+        -- and only honours it when `show_unsupported` is false.
+        show_unsupported = false,
+        file_filter      = function(filename)
             return Resolver.is_supported(filename)
         end,
         onConfirm = function(file_path)
@@ -265,8 +268,13 @@ function Frotz:_startGame(gamefile)
     util.makePath(save_dir)
     local autosave_path = self:_autosavePathFor(gamefile)
 
+    -- bocfel re-plays the whole transcript ("[Starting history playback]") on a
+    -- verb restore unless -H is given; git (Glulx) has no such replay and rejects
+    -- the flag, so only pass it to bocfel.
+    local extra_args = (vm == "bocfel") and { "-H" } or nil
+
     local function launch(auto_restore)
-        local ok, transport = pcall(Session.new, Session, binary, gamefile)
+        local ok, transport = pcall(Session.new, Session, binary, gamefile, extra_args)
         if not ok then
             UIManager:show(InfoMessage:new{
                 text = _("Failed to start interpreter:\n") .. tostring(transport),

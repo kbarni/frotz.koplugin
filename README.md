@@ -4,14 +4,18 @@ This plugin allows to play interactive fiction games in Koreader.
 
 ![Screenshot](screenshot_frotz.png)
 
-It uses the [Frotz](https://www.ifwiki.org/Frotz) interpreter to parse [Z-machine](https://www.ifwiki.org/Z-machine) file format (this is by far the most used format for interactive fiction): .z3, .z4, .z5, .z6, .z8, .zblorb, .zlb
+It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Two virtual machines are driven by the one engine, selected by file extension:
 
-The plugin is quite simple and text only. For a more complete interactive fiction interpreter use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle. It has graphics support, nicer rendering and supports most IF game formats. For other systems, check the relevant forums.
+- **Bocfel** — [Z-machine](https://www.ifwiki.org/Z-machine) games: `.z1`–`.z8`, `.zblorb`, `.zlb`, `.dat` (the most common interactive-fiction format)
+- **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.blb`, `.blorb`
+
+The plugin is text-focused (graphics in blorbs are ignored, not rendered). For a graphical interpreter use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
 
 ## Features
 
 - Should work on most platforms where Koreader is available
-- Z-machine games support (the most used format for interactive fiction)
+- Z-machine **and** Glulx (modern Inform 7) games support
+- Native KOReader rendering: status bar, styled text, single-key and line input
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
 - Game history, so you can resume the last played games
 - Word lookup in dictionaries or Wikipedia, just like in Koreader
@@ -24,13 +28,13 @@ To install, copy the contents of the release to the `koreader/plugins` folder.
 
 To run, click on *Interactive fiction* in the *Tools* menu.
 
-You might need to change it with one of the binaries below, according to your device:
+Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git` (Glulx), under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
-| File | Architecture | Devices |
-|------|--------------|---------|
-| [Download](https://github.com/kbarni/frotz.koplugin/blob/main/binaries/armhf/dfrotz) | ARM-HF | Most e-readers, recent Kindles and Kobos |
-| [Download](https://github.com/kbarni/frotz.koplugin/blob/main/binaries/armel/dfrotz) | ARM-EL | Older Kindles - firmware < 5.16.2 |
-| [Download](https://github.com/kbarni/frotz.koplugin/blob/main/binaries/x86_64/dfrotz) | X86 (64 bit) | Desktop computers (Linux) |
+| Folder | Architecture | Devices |
+|--------|--------------|---------|
+| `binaries/armhf/` | ARM hard-float | Most e-readers, recent (hard-float) Kindles and Kobos |
+| `binaries/armel/` | ARM soft-float | Older Kindles - firmware < 5.16.2 |
+| `binaries/x86_64/` | X86 (64 bit) | Desktop computers (Linux) / KOReader emulator |
 
 
 ## About interactive fiction games
@@ -45,9 +49,18 @@ To get IF games, check out one of the dedicated websites: [IFDB](https://ifdb.or
 
 ---
 
-**This is a work in progress.** Please file your ideas, suggestions bug reports as an issue.
+**This is a work in progress.** Please file your ideas, suggestions and bug reports as an issue.
 
-**[Frotz](https://gitlab.com/DavidGriffith/frotz)** is developed by David Griffith and distributed under GPL 2 license.
+> The plugin keeps the *Frotz* name for historical reasons, but it no longer uses the
+> Frotz interpreter. It now drives two RemGlk-linked virtual machines.
+
+## Credits
+
+The interpreters are bundled as separate binaries, each under its own license:
+
+- **[Bocfel](https://github.com/garglk/garglk/tree/master/terps/bocfel)** — Z-machine VM by Chris Spiegel
+- **[Git](https://github.com/DavidKinder/Git)** — Glulx VM by Iain Merrick
+- **[RemGlk](https://github.com/erkyrath/remglk)** — the JSON Glk I/O layer by Andrew Plotkin
 
 ## License
 

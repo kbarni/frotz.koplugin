@@ -81,11 +81,18 @@ function RemGlk:new(transport, json, cols, rows)
     }, self)
 
     -- Handshake: send `init` immediately so the VM produces its first update.
+    -- We advertise graphics caps even though Phase A doesn't render images: without
+    -- them, a game's glk_image_draw emits `{"type":"error","message":"image_draw:
+    -- graphics not supported"}` on stdout, which we'd read as a fatal error and end
+    -- the game. With the caps RemGlk emits an image *span* instead (ignored by
+    -- gameview) and play continues. Sound is deliberately NOT advertised: it is
+    -- fully stubbed in RemGlk (schannel_create returns NULL), so advertising it
+    -- would make games attempt playback and hit "invalid id" warnings.
     transport:send(json.encode({
         type    = "init",
         gen     = 0,
         metrics = { width = o.cols, height = o.rows },
-        support = { "timer", "hyperlinks" },
+        support = { "timer", "hyperlinks", "graphics", "graphicswin" },
     }) .. "\n")
 
     return o
@@ -177,6 +184,11 @@ function RemGlk:_normalize(obj)
     local update = { gen = obj.gen, raw = obj, story = {}, grids = {} }
 
     if obj.windows then self.windows = obj.windows end
+    -- Expose the carried-forward window geometry every turn: gameview needs grid
+    -- heights to tell a status bar from an epigraph/menu, and to notice a grid
+    -- collapsing to height 0 on a turn that sends only a geometry change (e.g.
+    -- Photopia clearing its epigraph upper window) with no grid content.
+    update.windows = self.windows
 
     local status_parts = {}
     for _, c in ipairs(obj.content or {}) do

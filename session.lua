@@ -34,9 +34,11 @@ Session.__index = Session
 
 -- vm_binary: absolute path to bocfel or git
 -- gamefile:  absolute path to the story file
+-- extra_args: optional list of literal CLI flags inserted before the game file
+--   (e.g. {"-H"} for bocfel to suppress history playback on restore).
 -- No -w/-h/-m: geometry travels in the JSON `init`, and the VM never paginates
 -- (we advertise a tall window and own paging in the UI).
-function Session:new(vm_binary, gamefile)
+function Session:new(vm_binary, gamefile, extra_args)
     local ts       = tostring(os.time()) .. "_" .. tostring(math.random(100000))
     local base     = "/tmp/remglk_" .. ts
     local fifo_in  = base .. "_in.fifo"
@@ -51,9 +53,13 @@ function Session:new(vm_binary, gamefile)
     -- open the write-end below, so our io.open(fifo, "w") does not block.
     -- stderr goes to its own file so VM warnings can never corrupt the JSON
     -- stream on stdout.
+    local args = ""
+    for _, a in ipairs(extra_args or {}) do
+        args = args .. "'" .. a .. "' "
+    end
     local cmd = string.format(
-        "'%s' '%s' < '%s' > '%s' 2> '%s' & echo $! > '%s'",
-        vm_binary, gamefile, fifo_in, out_file, err_file, pid_file
+        "'%s' %s'%s' < '%s' > '%s' 2> '%s' & echo $! > '%s'",
+        vm_binary, args, gamefile, fifo_in, out_file, err_file, pid_file
     )
     os.execute(cmd)
 
