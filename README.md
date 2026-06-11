@@ -49,10 +49,10 @@ To get IF games, check out one of the dedicated websites: [IFDB](https://ifdb.or
 
 ---
 
-**This is a work in progress.** Please file your ideas, suggestions and bug reports as an issue.
+Please file ideas, suggestions and bug reports as an issue.
 
-> The plugin keeps the *Frotz* name for historical reasons, but it no longer uses the
-> Frotz interpreter. It now drives two RemGlk-linked virtual machines.
+> The plugin keeps the *Frotz* name for historical reasons; it drives
+> RemGlk-linked virtual machines, not the Frotz interpreter.
 
 ## Credits
 
