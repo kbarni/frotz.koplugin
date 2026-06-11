@@ -31,30 +31,31 @@ local MAX_RECENT        = 10
 -- with the cross-builds in Phase 5; the file-existence scan is self-correcting
 -- when only one arch is actually present.
 
+-- Device ABI, not binary ABI: our VMs are statically linked, but a hard-float
+-- (armhf) binary still won't run on a soft-float (armel) userspace, and
+-- `uname -m` reports armv7l for both — it cannot tell them apart. The glibc
+-- dynamic loader path *does* encode the float ABI, so probe for it. The files
+-- are a proxy for the device, mutually exclusive on real hardware, and the
+-- check is a dependency-free file stat (no subprocess).
+local function file_exists(p)
+    return lfs.attributes(p, "mode") ~= nil
+end
+
 local function detect_arch()
-    local m
-    local p = io.popen and io.popen("uname -m 2>/dev/null")
-    if p then m = p:read("*l"); p:close() end
-    m = m or ""
-    if m:match("x86_64") or m:match("amd64") then return "x86_64" end
-    if m:match("aarch64") then return "aarch64" end
-    if m:match("arm") then return "armhf" end
-    return "x86_64"
+    if file_exists("/lib/ld-linux-armhf.so.3")    then return "armhf"  end -- Kobo, Kindle-hf
+    if file_exists("/lib/ld-linux.so.3")          then return "armel"  end -- Kindle PW2 (soft-float)
+    if file_exists("/lib64/ld-linux-x86-64.so.2") then return "x86_64" end
+    if file_exists("/lib/ld-linux-aarch64.so.1")  then return "aarch64" end
+    return "x86_64" -- emulator / desktop default
 end
 
 local _arch = detect_arch()
 
 local function binary_for(vm)
-    local candidates = {
-        _plugin_dir .. "/binaries/" .. _arch .. "/" .. vm,
-        _plugin_dir .. "/binaries/armhf/" .. vm,
-        _plugin_dir .. "/binaries/armel/" .. vm,
-        _plugin_dir .. "/binaries/x86_64/" .. vm,
-        _plugin_dir .. "/bin/" .. vm,
-    }
-    for _, path in ipairs(candidates) do
-        if lfs.attributes(path, "mode") then return path end
-    end
+    -- detect_arch() now reliably distinguishes armel/armhf/x86_64, so the binary
+    -- lives at exactly one path. No arch-guessing fallbacks needed.
+    local path = _plugin_dir .. "/binaries/" .. _arch .. "/" .. vm
+    if lfs.attributes(path, "mode") then return path end
     return nil
 end
 

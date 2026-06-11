@@ -402,11 +402,6 @@ function GameView:_setStatusFromUpdate(u)
             if (w.gridheight or 0) > gh then gh = w.gridheight end
         end
     end
-    -- Whether the game uses a status/grid window at all (even one collapsed to
-    -- height 0). Used by the autorestore gate to tell a pre-game question screen
-    -- (grid present but empty) from a genuinely status-less game.
-    self._has_grid_window = have_geom
-
     local was_fs = self._fs_text ~= nil
 
     if have_geom and gh == 0 then
@@ -719,29 +714,22 @@ end
 -- show its location text instead. Then split the (already wrapped) story into
 -- physical lines and reveal the first page; the rest paginates on tap / key.
 function GameView:_finishTurn()
-    -- Autorestore goes through the game's "restore" verb, which only works at the
-    -- main command prompt: at a char prompt the VM hangs, and at an intro yes/no
-    -- question ("Would you like instructions?") "restore" is just an invalid
-    -- answer (and the game keeps re-asking, so retrying would loop). We can't see
-    -- the parser state, but a game that uses a status bar leaves it empty during
-    -- its pre-game questions and fills it once play begins — so for those games we
-    -- wait for the status bar to populate. A game with no status window at all has
-    -- no such tell, so we just attempt at its first line prompt. A tall
-    -- epigraph/menu grid (_fs_text) is never the command prompt. The flag stays
-    -- set until a qualifying turn, so char/question intros resume cleanly later.
-    local intro_question = self._has_grid_window
-                           and #(self._status_lines or {}) == 0
-    local at_command_prompt = self._input_kind == "line"
-                              and not self._fs_text
-                              and not intro_question
-    if self._auto_restore_pending and at_command_prompt then
+    -- Autorestore goes through the game's "restore" verb, which works only at a
+    -- line prompt (at a char prompt the VM hangs), so we defer until the first
+    -- one — that covers Glulx games that open on a char intro. We attempt once:
+    -- if the game's first line prompt is its command prompt (Zork and most
+    -- games), it restores cleanly; if it is instead a pre-game yes/no question
+    -- (Photopia's "Would you like instructions?") "restore" is an invalid answer
+    -- and we can't tell the two apart, nor retry (the question just repeats). So
+    -- on failure we stop and point the player at manual resume rather than loop.
+    if self._auto_restore_pending and self._input_kind == "line" then
         self._auto_restore_pending = false
         local ok, text = self:_engineRestore(self._autosave_path)
         if ok then
             self:_pushLine(_("[Resumed from autosave]"))
             self._turn_buf = text or ""
         else
-            self:_pushLine(_("[Could not resume; starting fresh]"))
+            self:_pushLine(_("[Couldn't auto-resume here. Once you reach the game's command prompt, use the menu → Restore → Autosave.]"))
         end
     end
 
@@ -958,16 +946,16 @@ function GameView:_showSaveSlots(mode)
         })
         return
     end
-    -- Save/restore go through the game's verbs, which only work at the main
-    -- command prompt — not while the game waits for a single key, and not at a
-    -- pre-game question ("Would you like instructions?"), where the verb is just
-    -- an invalid answer. Such a question shows a line prompt but an empty status
-    -- bar on a game that uses one (see the autorestore gate in _finishTurn).
-    local intro_question = self._has_grid_window
-                           and #(self._status_lines or {}) == 0
-    if self._input_kind ~= "line" or self._fs_text or intro_question then
+    -- Save/restore go through the game's verbs, which only work at a command
+    -- (line) prompt — not while the game waits for a single key. We deliberately
+    -- do NOT try to block a pre-game yes/no question (e.g. Photopia's "Would you
+    -- like instructions?"): such a question is protocol-identical to the real
+    -- command prompt (same line input, same collapsed 0-height status grid), so
+    -- any heuristic would also block normal play. We let the attempt proceed; at
+    -- a genuine command prompt it works, elsewhere it fails gracefully.
+    if self._input_kind ~= "line" then
         UIManager:show(InfoMessage:new{
-            text = _("Save and restore are only available at the game's command prompt."),
+            text = _("Save and restore are only available at a command prompt."),
         })
         return
     end
