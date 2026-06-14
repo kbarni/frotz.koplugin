@@ -3,7 +3,6 @@ local Button           = require("ui/widget/button")
 local ButtonDialog     = require("ui/widget/buttondialog")
 local ConfirmBox       = require("ui/widget/confirmbox")
 local Device           = require("device")
-local Font             = require("ui/font")
 local FrameContainer   = require("ui/widget/container/framecontainer")
 local Geom             = require("ui/geometry")
 local GestureRange     = require("ui/gesturerange")
@@ -14,7 +13,6 @@ local InputContainer   = require("ui/widget/container/inputcontainer")
 local InputText        = require("ui/widget/inputtext")
 local LeftContainer    = require("ui/widget/container/leftcontainer")
 local LineWidget       = require("ui/widget/linewidget")
-local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local Size             = require("ui/size")
 local TextWidget       = require("ui/widget/textwidget")
 local SpinWidget       = require("ui/widget/spinwidget")
@@ -31,6 +29,8 @@ local T                = require("ffi/util").template
 local Screen           = Device.screen
 
 local ptf              = require("ptfwrap")
+local monoface         = require("monoface")
+local StyledScroll     = require("styledscroll")
 
 -- Save slots shown in the Save/Restore pickers.  "autosave" is the slot written
 -- on close and offered at launch; the rest are manual slots.  The save files are
@@ -112,9 +112,13 @@ function GameView:init()
     self._keyboard_visible = true   -- on-screen keyboard is shown on startup
     self._sw              = Screen:getWidth()
     self._sh              = Screen:getHeight()
-    -- Monospace face so our word-wrap to `cols` lines up exactly with the
-    -- rendered width (see main.lua for the cols derivation).
-    self._face            = Font:getFace("infont", self.font_size)
+    -- Monospace typewriter faces (Courier Prime regular/bold/italic/bolditalic)
+    -- so our word-wrap to `cols` lines up exactly with the rendered width (see
+    -- main.lua for the cols derivation, which measures the same regular face).
+    -- All four variants share metrics; styledscroll.lua draws styled runs from
+    -- them. Missing variants fall back to regular (and regular to bundled mono).
+    self._faceset         = monoface.getFaceSet(self.font_size)
+    self._face            = self._faceset.regular
     self._autosave_path   = self.save_dir and (self.save_dir .. "/autosave.qzl") or nil
     -- Restore the autosave on the first settled turn (the intro), see _finishTurn.
     self._auto_restore_pending = self.auto_restore and self._autosave_path ~= nil
@@ -510,13 +514,18 @@ function GameView:_buildScrollWidget()
         text = self.transcript
         text = text:gsub("\r", "")
         text = text:gsub("\n>[ \t]*$", "")
-        -- Enable TextBoxWidget's PTF parsing so the inline bold markers in the
-        -- transcript render (the header must be the very first character).
+        -- Mark the transcript as styled so StyledScroll parses the inline
+        -- bold/italic span markers (the header must be the very first char).
         text = ptf.PTF_HEADER .. text
     end
-    local stw = ScrollTextWidget:new{
+    local stw = StyledScroll:new{
         text          = text,
         face          = self._face,
+        styled_faces  = {
+            b  = self._faceset.bold,
+            i  = self._faceset.italic,
+            bi = self._faceset.bolditalic,
+        },
         width         = self._scroll_w,
         height        = self._scroll_h,
         scroll_by_pan = true,

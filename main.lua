@@ -8,7 +8,6 @@ local RenderText      = require("ui/rendertext")
 local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local Font            = require("ui/font")
 local logger          = require("logger")
 local util            = require("util")
 local _               = require("gettext")
@@ -16,6 +15,7 @@ local T               = require("ffi/util").template
 local Screen          = require("device").screen
 
 local Resolver  = require("engines/resolver")
+local monoface  = require("monoface")
 local rapidjson = require("rapidjson")
 
 -- Locate the plugin directory so we can find the interpreter binaries regardless
@@ -248,12 +248,14 @@ function Frotz:_startGame(gamefile)
     local font_size = self:_fontSize()
 
     -- cols is the monospace column width. GameView renders the transcript in a
-    -- fixed-width face ("infont") and word-wraps the story to `cols`, so one glyph
-    -- advance is constant and wrapping lines up exactly with the rendered width.
+    -- fixed-width typewriter face (Courier Prime) and word-wraps the story to
+    -- `cols`, so one glyph advance is constant and wrapping lines up exactly with
+    -- the rendered width. We measure the *same* face GameView renders with (see
+    -- monoface.lua), or its bundled-mono fallback if the font is missing.
     -- usable is the TextBoxWidget's inner width: ScrollTextWidget reserves
     -- scroll_bar_width (6) + text_scroll_span (12) on the right, and GameView
     -- pads by Size.padding.large on each side.
-    local face            = Font:getFace("infont", font_size)
+    local face            = monoface.getFace(font_size)
     local advance         = RenderText:sizeUtf8Text(0, Screen:getWidth(), face, "0").x
     local scroll_overhead = Screen:scaleBySize(6) + Screen:scaleBySize(12)
     local usable          = Screen:getWidth() - 2 * Size.padding.large - scroll_overhead
