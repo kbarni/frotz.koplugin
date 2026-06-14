@@ -34,7 +34,10 @@ Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git`
 |--------|--------------|---------|
 | `binaries/armhf/` | ARM hard-float | Most e-readers, recent (hard-float) Kindles and Kobos |
 | `binaries/armel/` | ARM soft-float | Older Kindles - firmware < 5.16.2 |
+| `binaries/aarch64/` | 64-bit ARM (Linux) | Newer aarch64 Linux e-readers |
 | `binaries/x86_64/` | X86 (64 bit) | Desktop computers (Linux) / KOReader emulator |
+
+The `aarch64` binaries will **not** run on Android devices (e.g. Boox or other tablets): Android uses a different C library (bionic), and its app storage is typically mounted non-executable, so the plugin's interpreter binaries cannot be launched there.
 
 
 ## About interactive fiction games
