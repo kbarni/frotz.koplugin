@@ -57,8 +57,17 @@ function Session:new(vm_binary, gamefile, extra_args)
     for _, a in ipairs(extra_args or {}) do
         args = args .. "'" .. a .. "' "
     end
+    -- Force the C locale on the VM child. bocfel snapshots undo state every turn
+    -- and timestamps it via std::locale("") (stack.cpp format_time), which makes
+    -- glibc parse the environment locale's LC_TIME data. With our statically
+    -- linked glibc against a device's mismatched locale-archive (seen on
+    -- PocketBook), that parse hits an assertion and abort()s the VM right after
+    -- the first command — an uncatchable SIGABRT, not a C++ exception, so
+    -- bocfel's own try/catch can't save it. LC_ALL=C keeps glibc on the built-in
+    -- C locale (no external data loaded) and never reaches the bad path. Harmless
+    -- for git, which doesn't touch locales.
     local cmd = string.format(
-        "'%s' %s'%s' < '%s' > '%s' 2> '%s' & echo $! > '%s'",
+        "LC_ALL=C LANG=C '%s' %s'%s' < '%s' > '%s' 2> '%s' & echo $! > '%s'",
         vm_binary, args, gamefile, fifo_in, out_file, err_file, pid_file
     )
     os.execute(cmd)
