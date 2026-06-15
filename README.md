@@ -2,7 +2,7 @@
 
 This plugin allows to play interactive fiction games in Koreader.
 
-![Screenshot](screenshot_frotz.png)
+![Screenshot](Screenshot_frotz2.png)
 
 It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Two virtual machines are driven by the one engine, selected by file extension:
 
