@@ -39,6 +39,13 @@ Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git`
 
 The `aarch64` binaries will **not** run on Android devices (e.g. Boox or other tablets): Android uses a different C library (bionic), and its app storage is typically mounted non-executable, so the plugin's interpreter binaries cannot be launched there.
 
+On some devices you need to make the binaries **executable**. Open the terminal and type:
+
+```
+cd Koreader/plugins/frotz.koplugin/binaries/<arch>
+chmod +x bocfel
+chmod +x git
+```
 
 ## About interactive fiction games
 
