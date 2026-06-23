@@ -109,7 +109,16 @@ function GameView:init()
     self._input_window    = nil        -- window id the VM is waiting on
     self._tap_overlay     = nil
     self._keyboard_height = 0
-    self._keyboard_visible = true   -- on-screen keyboard is shown on startup
+    -- Default the on-screen keyboard OFF when a physical/Bluetooth keyboard is
+    -- active. HIDPassthrough / the externalkeyboard plugin flip
+    -- Device:hasKeyboard() to true while one is connected, so that's our signal.
+    -- We suppress the OSK then because it is a FocusManager grid that hijacks the
+    -- physical Enter key — Enter maps to the logical "Press" key, which activates
+    -- the OSK's highlighted key (the top-left "1") instead of submitting — and it
+    -- routes taps through FocusManager methods this view doesn't implement. With
+    -- no OSK shown, the external keyboard drives the input field directly. The
+    -- user can still toggle the OSK on from the menu if they want it.
+    self._keyboard_visible = not Device:hasKeyboard()   -- shown on startup unless a physical keyboard is active
     self._sw              = Screen:getWidth()
     self._sh              = Screen:getHeight()
     -- Monospace typewriter faces (Courier Prime regular/bold/italic/bolditalic)
@@ -454,8 +463,13 @@ end
 -- ── Keyboard height management ─────────────────────────────────────────────────
 
 function GameView:_syncKeyboardHeight()
+    -- InputText:init() always instantiates its keyboard object (even when we
+    -- never show it — e.g. an external keyboard suppresses the OSK), and that
+    -- object carries a real dimen.h. Only reserve its height when the OSK is
+    -- actually visible; otherwise the input bar floats up by a keyboard's worth
+    -- of empty space instead of sitting at the bottom.
     local h = 0
-    if self._input_widget and self._input_widget.keyboard then
+    if self._keyboard_visible and self._input_widget and self._input_widget.keyboard then
         local d = self._input_widget.keyboard.dimen
         h = (d and d.h) or 0
     end
@@ -500,6 +514,22 @@ function GameView:onSwitchFocus(inputfield)
         inputfield:onShowKeyboard()
     end
     return true
+end
+
+-- InputText hosts itself in a FocusManager parent for DPad-based focus
+-- navigation. GameView is a FrameContainer, not a FocusManager, but when an
+-- external (e.g. Bluetooth) keyboard is attached `Device:hasDPad()` becomes
+-- true, so InputText:onTapTextBox calls these on its parent. We don't do
+-- inter-widget DPad navigation, so make them safe no-ops: returning nil from
+-- getFocusableWidgetXY makes the caller's `if x and y` guard skip moveFocusTo.
+-- Without these, tapping the input field with a keyboard attached crashes
+-- (attempt to call method 'getFocusableWidgetXY' (a nil value)).
+function GameView:getFocusableWidgetXY()
+    return nil
+end
+
+function GameView:moveFocusTo()
+    return false
 end
 
 -- ── Transcript helpers ─────────────────────────────────────────────────────────
