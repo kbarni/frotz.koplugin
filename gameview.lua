@@ -9,7 +9,6 @@ local GestureRange     = require("ui/gesturerange")
 local HorizontalGroup  = require("ui/widget/horizontalgroup")
 local HorizontalSpan   = require("ui/widget/horizontalspan")
 local InfoMessage      = require("ui/widget/infomessage")
-local InputContainer   = require("ui/widget/container/inputcontainer")
 local InputText        = require("ui/widget/inputtext")
 local LeftContainer    = require("ui/widget/container/leftcontainer")
 local LineWidget       = require("ui/widget/linewidget")
@@ -79,9 +78,11 @@ local TAP_HINT         = "[Tap to continue…]"
 local TAP_HINT_PATTERN = "\n*%[Tap to continue…%]%s*$"
 
 -- Shown while the game waits for a single keypress, so the player knows the
--- screen is live (games write "Press SPACE" and nothing else).
-local KEY_HINT         = "[Press a key, or tap here]"
-local KEY_HINT_PATTERN = "\n*%[Press a key, or tap here%]%s*$"
+-- screen is live (games write "Press SPACE" and nothing else). It spells out
+-- both routes because a tap can only ever mean Space: a menu that wants a
+-- particular key (Six's "press 1-5") is answered from the command field.
+local KEY_HINT         = "[Press a key: tap = Space, or type one below]"
+local KEY_HINT_PATTERN = "\n*%[Press a key: tap = Space, or type one below%]%s*$"
 
 -- Physical-key names -> the value RemGlk wants for a char event. A single
 -- character is sent as itself; only these names are recognised
@@ -140,7 +141,7 @@ function GameView:init()
     self._pending_lines   = {}         -- turn lines not yet revealed (pagination)
     self._input_kind      = nil        -- "line" | "char" | nil (turn in flight)
     self._input_window    = nil        -- window id the VM is waiting on
-    self._tap_overlay     = nil
+    self._timer_pending   = false      -- a timer tick held back by an unread page
     self._keyboard_height = 0
     -- Default the on-screen keyboard OFF when a physical/Bluetooth keyboard is
     -- active. HIDPassthrough / the externalkeyboard plugin flip
@@ -208,7 +209,6 @@ function GameView:handleEvent(event)
         if UIManager._window_stack[i].widget == self then
             if self._awaiting_more
                     and (event.name == "KeyPress" or event.name == "TextInput") then
-                self:_closeTapOverlay()
                 self:_advancePage()
                 return true
             end
@@ -620,7 +620,7 @@ function GameView:_buildScrollWidget()
         dialog        = self,
     }
     self:_enableWordLookup(stw)
-    self:_enableImageTaps(stw)
+    self:_enableStoryTaps(stw)
     return stw
 end
 
@@ -654,33 +654,61 @@ function GameView:_lookupWord(word)
     self.ui.dictionary:onLookupWord(word, false)
 end
 
--- Wire "tap on an [Illustration N] line" to opening that picture.  The resource
--- number is read back out of the rendered line (ImageStore.parseLabel), so no
--- side table has to survive word-wrap, scrolling and pagination.  Registered on
--- the inner TextBoxWidget for the same reason as the dictionary gestures above;
--- its own TapImage handler declines taps that aren't on an image, so ours still
--- gets a look.
-function GameView:_enableImageTaps(stw)
+-- Everything a tap on the story area can mean, in one handler on the inner
+-- TextBoxWidget: open the illustration under the finger, turn the page, or
+-- answer a "press a key" prompt with Space.
+--
+-- This deliberately does NOT use a separate full-screen grabber window. A
+-- top-level modal sits ABOVE the VirtualKeyboard in UIManager's window stack,
+-- and UIManager only offers an event to the topmost widget plus the
+-- `is_always_active` ones -- so a grabber silently kills the on-screen keyboard
+-- for as long as it is up. That made char prompts that want a *specific* key
+-- unanswerable on a touch-only device (Six's "press 1-5" menu: the OSK was
+-- dead, and the only tap available sent Space, which the menu rejects).
+-- Registering here instead keeps the tap inside GameView, which IS always
+-- active, so the OSK and the command field stay live underneath.
+--
+-- The resource number for an illustration is read back out of the rendered line
+-- (ImageStore.parseLabel), so no side table has to survive word-wrap, scrolling
+-- and pagination. Registered on the inner TextBoxWidget for the same reason as
+-- the dictionary gestures above: it is the paint-accurate dimen, and its handler
+-- runs before the ScrollTextWidget's own TapScrollText, so declining a tap still
+-- leaves plain scrolling working.
+function GameView:_enableStoryTaps(stw)
     if not Device:isTouchDevice() then return end
-    if not (self._images and self._images:isAvailable()) then return end
     local gameview = self
     local tw = stw.text_widget
     tw.ges_events = tw.ges_events or {}
-    tw.ges_events.TapIllustration = {
+    tw.ges_events.TapStory = {
         GestureRange:new{ ges = "tap", range = function() return tw.dimen end },
     }
-    tw.onTapIllustration = function(this, _arg, ges)
-        return gameview:_onTapIllustration(this, ges)
+    tw.onTapStory = function(this, _arg, ges)
+        return gameview:_onTapStory(this, ges)
     end
 end
 
-function GameView:_onTapIllustration(tw, ges)
-    if self._fs_text then return false end        -- a grid page, not the story
-    if self._awaiting_more then return false end  -- the tap overlay owns taps
-    local number = self:_illustrationAtTap(tw, ges)
-    if not number then return false end
-    self:_viewIllustration(number)
-    return true
+function GameView:_onTapStory(tw, ges)
+    -- A picture under the finger wins: the game is waiting either way.
+    if not self._fs_text and self._images and self._images:isAvailable() then
+        local number = self:_illustrationAtTap(tw, ges)
+        if number then
+            self:_viewIllustration(number)
+            return true
+        end
+    end
+    if self._awaiting_more then
+        self:_advancePage()
+        return true
+    end
+    -- A char prompt: tap means Space, the key nearly every "press any key"
+    -- prompt wants and the only one a touch-only device can give without
+    -- opening a keyboard. A prompt that wants a specific key is answered by
+    -- typing it into the command field (or on a physical keyboard).
+    if self._input_kind == "char" and not self._polling then
+        self:_sendCharKey(" ")
+        return true
+    end
+    return false   -- fall through to ScrollTextWidget's own tap-to-scroll
 end
 
 -- Which line of the transcript a tap landed on, and the picture it names.
@@ -790,7 +818,6 @@ end
 function GameView:_sendCharKey(key)
     if not (self.engine and key and key ~= "") then return end
     self:_cancelTimer()
-    self:_closeTapOverlay()
     self.transcript = self.transcript:gsub(KEY_HINT_PATTERN, "")
     self._input_widget:setText("")
     self.engine:send_char(self._input_window, key)
@@ -836,8 +863,9 @@ end
 
 function GameView:_startPolling()
     if self._polling then return end
-    self._polling    = true
-    self._input_kind = nil   -- input disabled until the turn returns
+    self._polling       = true
+    self._input_kind    = nil   -- input disabled until the turn returns
+    self._timer_pending = false
     self._poll_start = time.now()
     UIManager:scheduleIn(POLL_INTERVAL_S, function() self:_pollStep() end)
 end
@@ -909,7 +937,16 @@ function GameView:_applyUpdate(u)
     -- for the whole turn, and the player's key ends the wait anyway.
     if not u.input and not u.exited then
         if self._timer_ms then
-            self:_scheduleTimer()
+            -- …but not while a page of this turn is still unread. The next
+            -- update starts a fresh turn, and _finishTurn drops _pending_lines,
+            -- so ticking now would silently swallow the rest of the text (Six's
+            -- configuration screens are longer than a Kindle page). Hold the
+            -- tick; _advancePage resumes it once the player has read it all.
+            if self._awaiting_more then
+                self._timer_pending = true
+            else
+                self:_scheduleTimer()
+            end
         else
             -- No input request and no timer: the VM is blocked on something we
             -- cannot supply, and nothing the player does will move it. Say so
@@ -1026,25 +1063,16 @@ function GameView:_revealNextPage()
     if #self._pending_lines > 0 then
         self._awaiting_more = true
         self.transcript = self.transcript .. "\n" .. TAP_HINT
-        self:_refreshDisplay()
-        self:_showTapOverlay()
+    elseif self._input_kind == "char" then
+        -- The whole turn is on screen and the game wants one key. Say so: a tap
+        -- on the story sends Space (see _onTapStory), and the command field is
+        -- there for a prompt that wants a particular key.
+        self._awaiting_more = false
+        self.transcript = self.transcript .. "\n" .. KEY_HINT
     else
         self._awaiting_more = false
-        -- The whole turn is on screen and the game wants one key. Say so, and
-        -- make a tap on the story count as Space — the key nearly every "press
-        -- any key" prompt means, and the only one a touch-only device can give
-        -- without opening a keyboard.
-        if self._input_kind == "char" then
-            self.transcript = self.transcript .. "\n" .. KEY_HINT
-            self:_refreshDisplay()
-            self:_showTapOverlay{
-                clear_of_input_bar = true,
-                on_tap = function() self:_sendCharKey(" ") end,
-            }
-        else
-            self:_refreshDisplay()
-        end
     end
+    self:_refreshDisplay()
 end
 
 -- Pagination is entirely local (the VM never paginates), so advancing a page
@@ -1052,67 +1080,12 @@ end
 function GameView:_advancePage()
     self._awaiting_more = false
     self:_revealNextPage()
-end
-
--- ── Tap-to-continue overlay ───────────────────────────────────────────────────
-
-function GameView:_closeTapOverlay()
-    if self._tap_overlay then
-        UIManager:close(self._tap_overlay)
-        self._tap_overlay = nil
+    -- A timer tick held back while the player was still reading (see
+    -- _applyUpdate) resumes once the whole turn is on screen.
+    if self._timer_pending and not self._awaiting_more then
+        self._timer_pending = false
+        self:_scheduleTimer()
     end
-end
-
--- A full-screen tap grabber over the story. `opts.on_tap` defaults to turning
--- the page; `opts.clear_of_input_bar` keeps the zone above the command field so
--- the player can still type a specific key while the grabber is up. A tap that
--- lands on an illustration opens it instead — the game is waiting either way.
-function GameView:_showTapOverlay(opts)
-    opts = opts or {}
-    local gameview = self
-    local sh = self._sh
-    local zone_h = sh - self._title_h - self._keyboard_height
-    if opts.clear_of_input_bar then
-        zone_h = zone_h - self._input_bar_h - self._sep_h
-    end
-    if zone_h < 1 then return end
-
-    local overlay = InputContainer:new{
-        modal = true,
-        dimen = Geom:new{ x = 0, y = 0, w = self._sw, h = sh },
-    }
-    overlay:registerTouchZones({
-        {
-            id = "frotz_tap_continue",
-            ges = "tap",
-            screen_zone = {
-                ratio_x = 0,
-                ratio_y = self._title_h / sh,
-                ratio_w = 1,
-                ratio_h = zone_h / sh,
-            },
-            handler = function(ges)
-                local tw = gameview._scroll and gameview._scroll.text_widget
-                if tw and ges and ges.pos then
-                    local number = gameview:_illustrationAtTap(tw, ges)
-                    if number then
-                        gameview:_viewIllustration(number)
-                        return true
-                    end
-                end
-                UIManager:close(overlay)
-                gameview._tap_overlay = nil
-                if opts.on_tap then
-                    opts.on_tap()
-                else
-                    gameview:_advancePage()
-                end
-                return true
-            end,
-        },
-    })
-    self._tap_overlay = overlay
-    UIManager:show(overlay)
 end
 
 -- ── In-game menu ───────────────────────────────────────────────────────────────
@@ -1479,7 +1452,6 @@ function GameView:onClose()
     self._timer_ms = nil
     self:_cancelTimer()
     self:_removeDictModalHook()
-    self:_closeTapOverlay()
     if self.engine then
         -- Autosave before quitting so the next launch can resume. Only if the
         -- game is still running (a finished game can't be saved) and the turn
