@@ -31,6 +31,7 @@ local Screen           = Device.screen
 local ptf              = require("ptfwrap")
 local monoface         = require("monoface")
 local StyledScroll     = require("styledscroll")
+local ImageStore       = require("imagestore")
 
 -- Save slots shown in the Save/Restore pickers.  "autosave" is the slot written
 -- on close and offered at launch; the rest are manual slots.  The save files are
@@ -47,6 +48,13 @@ local SAVE_SLOTS = {
 
 local MIN_FONT_SIZE   = 14
 local MAX_FONT_SIZE   = 32
+
+-- How much of a game's art reaches the story text (see imagestore.lua).
+local IMAGE_MODE_LABELS = {
+    off     = _("Off"),
+    notable = _("Notable only"),
+    all     = _("All"),
+}
 
 -- A grid window taller than this many rows is not a status bar: it's an epigraph
 -- quote-box, a boxed menu, or a map. Z-machine games draw these by temporarily
@@ -70,6 +78,30 @@ local SAVE_WAIT_GUARD = 4
 local TAP_HINT         = "[Tap to continue…]"
 local TAP_HINT_PATTERN = "\n*%[Tap to continue…%]%s*$"
 
+-- Shown while the game waits for a single keypress, so the player knows the
+-- screen is live (games write "Press SPACE" and nothing else).
+local KEY_HINT         = "[Press a key, or tap here]"
+local KEY_HINT_PATTERN = "\n*%[Press a key, or tap here%]%s*$"
+
+-- Physical-key names -> the value RemGlk wants for a char event. A single
+-- character is sent as itself; only these names are recognised
+-- (`special_char_table`, rgdata.c). Note there is deliberately NO "space"
+-- entry: RemGlk would read the string "space" as its first letter, "s". A
+-- space must be the literal " " -- which is also what KOReader calls the key.
+local CHAR_KEY_NAMES = {
+    Press = "return",  Enter = "return",  Return = "return", KP_Enter = "return",
+    Left  = "left",    Right = "right",   Up     = "up",     Down     = "down",
+    Back  = "escape",  Escape = "escape", Tab    = "tab",
+    Home  = "home",    End   = "end",
+    Backspace = "delete", Del = "delete",
+    LPgFwd = "pagedown",  RPgFwd = "pagedown",
+    LPgBack = "pageup",   RPgBack = "pageup",
+}
+
+-- Floor on a game's timer interval. A timer costs a VM round-trip and a screen
+-- refresh, which is expensive on e-ink, so a game asking for 20 ms gets this.
+local MIN_TIMER_MS = 100
+
 -- GameView extends FrameContainer (not InputContainer/WidgetContainer).
 -- FrameContainer.paintTo records its own dimen.x/y on every repaint, which child
 -- InputContainers (Button, TitleBar IconButton) read for gesture hit-testing.
@@ -91,6 +123,7 @@ local GameView = FrameContainer:extend{
     save_dir   = nil,   -- per-game directory for save slots + autosave
     auto_restore = false, -- restore the autosave once the intro settles
     ui         = nil,   -- hosting FileManager/ReaderUI, for dictionary lookup
+    game_path  = nil,   -- the game file, read as a Blorb for its illustrations
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -131,6 +164,21 @@ function GameView:init()
     self._autosave_path   = self.save_dir and (self.save_dir .. "/autosave.qzl") or nil
     -- Restore the autosave on the first settled turn (the intro), see _finishTurn.
     self._auto_restore_pending = self.auto_restore and self._autosave_path ~= nil
+    -- Illustrations. RemGlk sends a Blorb resource number, never pixels, so we
+    -- read the game's own Blorb and let imagestore.lua decide which images earn
+    -- a line of transcript; the placeholders it returns are tappable, and
+    -- everything the story has drawn stays reachable from the menu.
+    self._images = ImageStore.new{
+        game_path = self.game_path,
+        max_width = self.cols,
+        mode      = self.settings and self.settings:readSetting("image_mode"),
+    }
+    if self.engine then
+        local gameview = self
+        self.engine.image_hook = function(span)
+            return gameview._images:describe(span)
+        end
+    end
     self:_build()
 end
 
@@ -158,13 +206,23 @@ end
 function GameView:handleEvent(event)
     for i = #UIManager._window_stack, 1, -1 do
         if UIManager._window_stack[i].widget == self then
-            if self._awaiting_more and event.name == "KeyPress" then
-                if self._tap_overlay then
-                    UIManager:close(self._tap_overlay)
-                    self._tap_overlay = nil
-                end
+            if self._awaiting_more
+                    and (event.name == "KeyPress" or event.name == "TextInput") then
+                self:_closeTapOverlay()
                 self:_advancePage()
                 return true
+            end
+            -- A char prompt wants ONE key, not a typed line: route real keys
+            -- straight to the VM so "Press SPACE" works by pressing space,
+            -- rather than requiring the player to type an invisible space into
+            -- the command field and hit Send. The field still works for keys a
+            -- device has no button for.
+            if self._input_kind == "char" and not self._polling then
+                local key = self:_charKeyFromEvent(event)
+                if key then
+                    self:_sendCharKey(key)
+                    return true
+                end
             end
             return FrameContainer.handleEvent(self, event)
         end
@@ -562,6 +620,7 @@ function GameView:_buildScrollWidget()
         dialog        = self,
     }
     self:_enableWordLookup(stw)
+    self:_enableImageTaps(stw)
     return stw
 end
 
@@ -593,6 +652,72 @@ function GameView:_lookupWord(word)
     if not word or word == "" then return end
     if not (self.ui and self.ui.dictionary) then return end
     self.ui.dictionary:onLookupWord(word, false)
+end
+
+-- Wire "tap on an [Illustration N] line" to opening that picture.  The resource
+-- number is read back out of the rendered line (ImageStore.parseLabel), so no
+-- side table has to survive word-wrap, scrolling and pagination.  Registered on
+-- the inner TextBoxWidget for the same reason as the dictionary gestures above;
+-- its own TapImage handler declines taps that aren't on an image, so ours still
+-- gets a look.
+function GameView:_enableImageTaps(stw)
+    if not Device:isTouchDevice() then return end
+    if not (self._images and self._images:isAvailable()) then return end
+    local gameview = self
+    local tw = stw.text_widget
+    tw.ges_events = tw.ges_events or {}
+    tw.ges_events.TapIllustration = {
+        GestureRange:new{ ges = "tap", range = function() return tw.dimen end },
+    }
+    tw.onTapIllustration = function(this, _arg, ges)
+        return gameview:_onTapIllustration(this, ges)
+    end
+end
+
+function GameView:_onTapIllustration(tw, ges)
+    if self._fs_text then return false end        -- a grid page, not the story
+    if self._awaiting_more then return false end  -- the tap overlay owns taps
+    local number = self:_illustrationAtTap(tw, ges)
+    if not number then return false end
+    self:_viewIllustration(number)
+    return true
+end
+
+-- Which line of the transcript a tap landed on, and the picture it names.
+-- Everything here reads version-sensitive TextBoxWidget state, so each step
+-- bails out rather than assuming: a miss just falls through to normal handling.
+function GameView:_illustrationAtTap(tw, ges)
+    local lines = tw.vertical_string_list
+    local line_h = tw.line_height_px
+    if not (lines and tw.dimen and line_h and line_h > 0) then return nil end
+    local row = (tw.virtual_line_num or 1)
+                + math.floor((ges.pos.y - tw.dimen.y) / line_h)
+    local line = lines[row]
+    if not (line and line.offset and line.end_offset) then return nil end
+
+    -- styledscroll keeps the marker-free characters it shaped, indexed the same
+    -- way as the line offsets.  Stock TextBoxWidget's own charlist is only a
+    -- table when XText is off (with XText it IS the XText userdata), so it is
+    -- a fallback and type-checked.
+    local chars = tw._ptf_chars
+    if type(chars) ~= "table" then
+        chars = type(tw.charlist) == "table" and tw.charlist or nil
+    end
+    if not chars then return nil end
+
+    local number = ImageStore.parseLabel(
+        ImageStore.lineText(chars, line.offset, line.end_offset))
+    if number and self._images:isViewable(number) then return number end
+    return nil
+end
+
+function GameView:_viewIllustration(number)
+    local ok, err = self._images:view(number)
+    if not ok then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Can't show that illustration: %1"), tostring(err)),
+        })
+    end
 end
 
 -- For the game view's lifetime, wrap UIManager:show to mark any DictQuickLookup
@@ -636,6 +761,43 @@ end
 
 -- ── Player input ───────────────────────────────────────────────────────────────
 
+-- Turn a real key event into the value RemGlk expects, or nil when this event
+-- is not a key the game can be given. In the SDL emulator (and with most
+-- soft/BT keyboards) printable characters arrive as TextInput rather than
+-- KeyPress, so both have to be understood.
+function GameView:_charKeyFromEvent(event)
+    if event.name == "TextInput" then
+        local text = event.args and event.args[1]
+        if type(text) ~= "string" or text == "" then return nil end
+        return ptf.split_chars(text)[1]
+    elseif event.name == "KeyPress" then
+        local key = event.args and event.args[1]
+        local name = key and key.key
+        if type(name) ~= "string" or name == "" then return nil end
+        local named = CHAR_KEY_NAMES[name]
+        if named then return named end
+        -- Single-character key names are the key itself; that covers letters
+        -- and digits, and the spacebar, which KOReader names " ".
+        if #name == 1 then
+            return key.Shift and name:upper() or name:lower()
+        end
+        return nil
+    end
+    return nil
+end
+
+-- Answer a char prompt with one key.
+function GameView:_sendCharKey(key)
+    if not (self.engine and key and key ~= "") then return end
+    self:_cancelTimer()
+    self:_closeTapOverlay()
+    self.transcript = self.transcript:gsub(KEY_HINT_PATTERN, "")
+    self._input_widget:setText("")
+    self.engine:send_char(self._input_window, key)
+    self:_startPolling()
+    self:_refreshDisplay()
+end
+
 function GameView:onSubmit()
     if self._polling then return end
     if self._awaiting_more then
@@ -649,17 +811,17 @@ function GameView:onSubmit()
     -- char input (menus / "press a key"): send one key. Use the typed first
     -- char if any, else Return. (Glulx games request char from turn 1.)
     if self._input_kind == "char" then
-        local key = (raw ~= "" and raw:sub(1, 1)) or "return"
-        self._input_widget:setText("")
-        self.engine:send_char(self._input_window, key)
-        self:_startPolling()
-        self:_refreshDisplay()
+        -- A typed character wins; an empty field means Return. Never send "":
+        -- RemGlk treats an empty char value as a fatal protocol error.
+        local key = (raw ~= "" and ptf.split_chars(raw)[1]) or "return"
+        self:_sendCharKey(key)
         return
     end
 
     -- line input: echo the command immediately for responsiveness. The VM also
     -- echoes it as an "input"-styled run, which _storyToBuf drops to avoid a dup.
     local cmd = raw:match("^%s*(.-)%s*$") or ""
+    self:_cancelTimer()
     if self.transcript ~= "" then
         self.transcript = self.transcript .. "\n"
     end
@@ -724,6 +886,12 @@ function GameView:_applyUpdate(u)
 
     self._turn_buf = self:_storyToBuf(u)
 
+    -- RemGlk reports a timer interval only when it changes: a number sets it,
+    -- false cancels it, nil leaves it alone.
+    if u.timer ~= nil then
+        self._timer_ms = u.timer or nil
+    end
+
     if u.input then
         self._input_kind   = u.input.kind
         self._input_window = u.input.window
@@ -733,7 +901,46 @@ function GameView:_applyUpdate(u)
 
     self:_finishTurn()
 
+    -- A turn that asks for no input at all is waiting on its timer, and nothing
+    -- the player does can move it — RemGlk hands timer events to the display
+    -- layer. Feed it, or the game hangs with input dead (Six's configuration
+    -- screens do exactly this). We deliberately do NOT tick while the game is
+    -- also waiting for input: that would repaint an e-ink screen every interval
+    -- for the whole turn, and the player's key ends the wait anyway.
+    if not u.input and not u.exited then
+        if self._timer_ms then
+            self:_scheduleTimer()
+        else
+            -- No input request and no timer: the VM is blocked on something we
+            -- cannot supply, and nothing the player does will move it. Say so
+            -- in the log rather than sitting there looking frozen.
+            logger.warn("Frotz: turn requested no input and set no timer; the game is waiting on something unsupported")
+        end
+    end
+
     if u.exited then self:_onGameEnded() end
+end
+
+-- ── Timer events ───────────────────────────────────────────────────────────────
+
+-- Bumping the sequence invalidates any tick already scheduled: the closures are
+-- anonymous, so there is nothing to hand UIManager:unschedule (see CLAUDE.md).
+function GameView:_cancelTimer()
+    self._timer_seq = (self._timer_seq or 0) + 1
+end
+
+function GameView:_scheduleTimer()
+    if not self._timer_ms then return end
+    self:_cancelTimer()
+    local seq = self._timer_seq
+    local delay = math.max(self._timer_ms, MIN_TIMER_MS) / 1000
+    UIManager:scheduleIn(delay, function()
+        if seq ~= self._timer_seq then return end   -- superseded or cancelled
+        if not (self.engine and self._timer_ms) then return end
+        if self._polling then return end
+        self.engine:send_timer()
+        self:_startPolling()
+    end)
 end
 
 -- ── Story → display text ─────────────────────────────────────────────────────────
@@ -802,6 +1009,7 @@ end
 
 function GameView:_revealNextPage()
     self.transcript = self.transcript:gsub(TAP_HINT_PATTERN, "")
+    self.transcript = self.transcript:gsub(KEY_HINT_PATTERN, "")
 
     local n = self:_linesPerPage()
     local revealed = {}
@@ -822,7 +1030,20 @@ function GameView:_revealNextPage()
         self:_showTapOverlay()
     else
         self._awaiting_more = false
-        self:_refreshDisplay()
+        -- The whole turn is on screen and the game wants one key. Say so, and
+        -- make a tap on the story count as Space — the key nearly every "press
+        -- any key" prompt means, and the only one a touch-only device can give
+        -- without opening a keyboard.
+        if self._input_kind == "char" then
+            self.transcript = self.transcript .. "\n" .. KEY_HINT
+            self:_refreshDisplay()
+            self:_showTapOverlay{
+                clear_of_input_bar = true,
+                on_tap = function() self:_sendCharKey(" ") end,
+            }
+        else
+            self:_refreshDisplay()
+        end
     end
 end
 
@@ -835,9 +1056,27 @@ end
 
 -- ── Tap-to-continue overlay ───────────────────────────────────────────────────
 
-function GameView:_showTapOverlay()
+function GameView:_closeTapOverlay()
+    if self._tap_overlay then
+        UIManager:close(self._tap_overlay)
+        self._tap_overlay = nil
+    end
+end
+
+-- A full-screen tap grabber over the story. `opts.on_tap` defaults to turning
+-- the page; `opts.clear_of_input_bar` keeps the zone above the command field so
+-- the player can still type a specific key while the grabber is up. A tap that
+-- lands on an illustration opens it instead — the game is waiting either way.
+function GameView:_showTapOverlay(opts)
+    opts = opts or {}
     local gameview = self
     local sh = self._sh
+    local zone_h = sh - self._title_h - self._keyboard_height
+    if opts.clear_of_input_bar then
+        zone_h = zone_h - self._input_bar_h - self._sep_h
+    end
+    if zone_h < 1 then return end
+
     local overlay = InputContainer:new{
         modal = true,
         dimen = Geom:new{ x = 0, y = 0, w = self._sw, h = sh },
@@ -850,12 +1089,24 @@ function GameView:_showTapOverlay()
                 ratio_x = 0,
                 ratio_y = self._title_h / sh,
                 ratio_w = 1,
-                ratio_h = (sh - self._title_h - self._keyboard_height) / sh,
+                ratio_h = zone_h / sh,
             },
-            handler = function()
+            handler = function(ges)
+                local tw = gameview._scroll and gameview._scroll.text_widget
+                if tw and ges and ges.pos then
+                    local number = gameview:_illustrationAtTap(tw, ges)
+                    if number then
+                        gameview:_viewIllustration(number)
+                        return true
+                    end
+                end
                 UIManager:close(overlay)
                 gameview._tap_overlay = nil
-                gameview:_advancePage()
+                if opts.on_tap then
+                    opts.on_tap()
+                else
+                    gameview:_advancePage()
+                end
                 return true
             end,
         },
@@ -902,6 +1153,15 @@ function GameView:showMenu()
             end,
         }})
     end
+    if self._images and self._images:isAvailable() then
+        table.insert(buttons, {{
+            text     = _("Illustrations"),
+            callback = function()
+                UIManager:close(menu)
+                self:_showIllustrations()
+            end,
+        }})
+    end
     table.insert(buttons, {{
         text     = _("Font size"),
         callback = function()
@@ -925,6 +1185,72 @@ function GameView:showMenu()
         buttons = buttons,
     }
     UIManager:show(menu)
+end
+
+-- ── Illustrations ──────────────────────────────────────────────────────────────
+
+-- The gallery: how much art reaches the story, plus every picture the game has
+-- actually drawn so far (and the cover).  Pictures the story has not reached
+-- are deliberately absent — a gallery should not spoil art that is still ahead.
+function GameView:_showIllustrations()
+    local dialog
+    local mode = self._images.mode
+    local buttons = {
+        {{
+            text     = T(_("Show in story: %1"), IMAGE_MODE_LABELS[mode] or mode),
+            callback = function()
+                UIManager:close(dialog)
+                self:_cycleImageMode()
+            end,
+        }},
+    }
+    local shown = self._images:list()
+    for _, item in ipairs(shown) do
+        local number = item.number
+        table.insert(buttons, {{
+            text     = item.label,
+            enabled  = self._images:isViewable(number),
+            callback = function()
+                UIManager:close(dialog)
+                self:_viewIllustration(number)
+            end,
+        }})
+    end
+    if #shown == 0 then
+        table.insert(buttons, {{
+            text     = _("Nothing shown yet"),
+            enabled  = false,
+            callback = function() end,
+        }})
+    end
+    dialog = ButtonDialog:new{
+        modal       = true,
+        title       = _("Illustrations"),
+        title_align = "center",
+        buttons     = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+-- Off / Notable only / All.  "Notable only" is the default: it keeps the first
+-- sighting of each real picture and drops the ornaments games redraw every
+-- move, which would otherwise cost a line of transcript per turn.
+function GameView:_cycleImageMode()
+    local modes = ImageStore.MODES
+    local idx = 1
+    for i, m in ipairs(modes) do
+        if m == self._images.mode then idx = i end
+    end
+    local next_mode = modes[(idx % #modes) + 1]
+    self._images:setMode(next_mode)
+    if self.settings then
+        self.settings:saveSetting("image_mode", next_mode)
+        self.settings:flush()
+    end
+    UIManager:show(InfoMessage:new{
+        text = T(_("Illustrations in the story: %1\nApplies to what the game draws from here on."),
+                 IMAGE_MODE_LABELS[next_mode] or next_mode),
+    })
 end
 
 -- Font size persists to settings and applies on the next launch: changing it
@@ -1150,11 +1476,10 @@ end
 
 function GameView:onClose()
     self._polling = false
+    self._timer_ms = nil
+    self:_cancelTimer()
     self:_removeDictModalHook()
-    if self._tap_overlay then
-        UIManager:close(self._tap_overlay)
-        self._tap_overlay = nil
-    end
+    self:_closeTapOverlay()
     if self.engine then
         -- Autosave before quitting so the next launch can resume. Only if the
         -- game is still running (a finished game can't be saved) and the turn

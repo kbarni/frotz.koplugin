@@ -78,6 +78,11 @@ function RemGlk:new(transport, json, cols, rows)
         _status        = nil,          -- last known status line (carried forward)
         _buf_pending   = false,        -- a non-append line needs a leading newline
         windows        = nil,          -- last seen window geometry (for gameview)
+        -- Optional hook, set by the display layer: function(image_span) ->
+        -- text, style. RemGlk sends only a Blorb resource number for an
+        -- illustration, never pixels, so the display layer decides what (if
+        -- anything) an image becomes in the story text. nil = drop images.
+        image_hook     = nil,
     }, self)
 
     -- Handshake: send `init` immediately so the VM produces its first update.
@@ -113,6 +118,15 @@ function RemGlk:send_char(window, key)
     self.transport:send(self.json.encode({
         type = "char", gen = self._gen,
         window = window or self._input_window, value = key,
+    }) .. "\n")
+end
+
+-- Timer events are the DISPLAY layer's job in RemGlk: when a game asks for them
+-- the VM emits an update requesting no input at all and simply waits for us to
+-- send this. Without it such a turn hangs forever with input disabled.
+function RemGlk:send_timer()
+    self.transport:send(self.json.encode({
+        type = "timer", gen = self._gen,
     }) .. "\n")
 end
 
@@ -155,22 +169,50 @@ function RemGlk:_absorb_buffer(c, runs)
         self._buf_pending = false  -- transcript reset: no leading newline
     end
     for _, line in ipairs(c.text or {}) do
-        local is_append = line.append == true
-        if not is_append and self._buf_pending then
-            runs[#runs + 1] = { text = "\n", style = "normal" }
-        end
-        for _, span in ipairs(line.content or {}) do
+        local spans = line.content or {}
+        -- Resolve the line's spans BEFORE deciding whether the line exists at
+        -- all. A line can carry nothing we render — an image the hook drops, or
+        -- a setcolor/fill special we never render — and emitting its newline
+        -- anyway would leave a blank line in the transcript for every
+        -- suppressed ornament.
+        local line_runs, own_line = {}, false
+        for _, span in ipairs(spans) do
+            local run, standalone
             if span.text then
-                runs[#runs + 1] = {
+                run = {
                     text = span.text,
                     style = span.style or "normal",
                     hyperlink = span.hyperlink,
                 }
+            elseif span.special == "image" and self.image_hook then
+                local text, style = self.image_hook(span)
+                if text then
+                    run, standalone = { text = text, style = style or "normal" }, true
+                end
             end
-            -- Phase A: image/setcolor/fill special spans are ignored (no pixels
-            -- on e-ink yet); see remglk_migration_plan.md §4a.
+            -- image/setcolor/fill spans with no replacement are dropped; see
+            -- remglk_migration_plan.md §4a.
+            if run then
+                -- An image placeholder gets a physical line of its own rather
+                -- than being jammed into the prose it interrupts.
+                if #line_runs > 0 and (standalone or own_line) then
+                    line_runs[#line_runs + 1] = { text = "\n", style = "normal" }
+                end
+                line_runs[#line_runs + 1] = run
+                own_line = standalone
+            end
         end
-        self._buf_pending = true
+
+        if #spans == 0 or #line_runs > 0 then
+            local is_append = line.append == true
+            if not is_append and self._buf_pending then
+                runs[#runs + 1] = { text = "\n", style = "normal" }
+            end
+            for _, run in ipairs(line_runs) do
+                runs[#runs + 1] = run
+            end
+            self._buf_pending = true
+        end
     end
     return cleared
 end
@@ -206,6 +248,14 @@ function RemGlk:_normalize(obj)
     -- Track the update's gen as the default to echo (a specialresponse uses this;
     -- a line/char input below overrides it with the input entry's own gen).
     if obj.gen ~= nil then self._gen = obj.gen end
+
+    -- Timer interval, reported only when it CHANGES: a number starts or
+    -- restarts it, JSON null cancels it, an absent field means "unchanged".
+    -- null decodes to a sentinel (rapidjson.null), not nil, so a present-but-
+    -- not-a-number value really is a cancel and not a missing key.
+    if obj.timer ~= nil then
+        update.timer = (type(obj.timer) == "number" and obj.timer > 0) and obj.timer or false
+    end
 
     -- Turn boundary: the input request. line / char come in the input[] array.
     for _, inp in ipairs(obj.input or {}) do

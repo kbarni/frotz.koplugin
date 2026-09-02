@@ -85,6 +85,12 @@ function StyledTextBox:_parseStyleMarkers()
     self.text = table.concat(out)
     self._ptf_style = style
     self._ptf_code  = code
+    -- Keep the marker-free characters: `out[i]` lines up with XText's
+    -- text_index (and with the charlist stock TextBoxWidget builds when XText
+    -- is off), so a caller holding a line's offset/end_offset can slice the
+    -- rendered text back out without touching XText internals — self.charlist
+    -- is the XText userdata itself under use_xtext, not a table.
+    self._ptf_chars = out
 end
 
 function StyledTextBox:init()

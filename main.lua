@@ -290,6 +290,7 @@ function Frotz:_startGame(gamefile)
         local game_view = GameView:new{
             engine       = engine,
             game_title   = fname,
+            game_path    = gamefile,
             font_size    = font_size,
             cols         = cols,
             settings     = self._settings,
