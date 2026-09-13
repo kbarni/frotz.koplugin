@@ -7,7 +7,7 @@ This plugin allows to play interactive fiction games in Koreader.
 It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Two virtual machines are driven by the one engine, selected by file extension:
 
 - **Bocfel** — [Z-machine](https://www.ifwiki.org/Z-machine) games: `.z1`–`.z8`, `.zblorb`, `.zlb`, `.dat` (the most common interactive-fiction format)
-- **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.blb`, `.blorb`
+- **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.glb`, `.blb`, `.blorb`
 
 The plugin is text-focused. Illustrations packed into a game's blorb *are* available — the story shows a tappable `[Illustration 3]` line where the game draws a picture, and tapping it (or the menu's **Illustrations** entry) opens it full screen with pan and zoom. What the plugin does not do is lay pictures out inside the text or paint the graphics windows some Glulx games use for maps and borders; for that, use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
 
@@ -17,7 +17,7 @@ The plugin is text-focused. Illustrations packed into a game's blorb *are* avail
 - Z-machine **and** Glulx (modern Inform 7) games support
 - Native KOReader rendering: status bar, styled text, single-key and line input
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
-- Game history, so you can resume the last played games
+- Recent games list, so you can pick up a game you played before without browsing for it again
 - Illustrations from the game's blorb, opened full screen from the story or the menu
 - Word lookup in dictionaries or Wikipedia, just like in Koreader
 - Possibility to hide on screen keyboard when using it with external keyboard
