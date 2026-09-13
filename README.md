@@ -46,8 +46,6 @@ Open a Twine game's `.html` file like any other game. Links are underlined; tap 
 
 Twine formats are web pages, and KOReader has no web browser, so the plugin plays them with its own reimplementation of the story formats. Most choice-based stories work. What does not: page styling and layout (CSS), images (their alt text is shown), sound, animations, and games that rely on their own JavaScript to change the page.
 
-> For now the Twine player's `qjs` binary is only included for `x86_64` (desktop and the KOReader emulator); device builds are coming.
-
 Each architecture ships the interpreter binaries `bocfel` (Z-machine), `git` (Glulx) and `qjs` (QuickJS, for Twine) under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
 | Folder | Architecture | Devices |
