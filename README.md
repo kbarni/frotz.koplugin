@@ -18,6 +18,7 @@ The plugin is text-focused. Illustrations packed into a game's blorb *are* avail
 - Native KOReader rendering: status bar, styled text, single-key and line input
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
 - Recent games list, so you can pick up a game you played before without browsing for it again
+- Built-in game finder: browse and search [IFDB](https://ifdb.org), read a game's description and rating, download it and play
 - Illustrations from the game's blorb, opened full screen from the story or the menu
 - Word lookup in dictionaries or Wikipedia, just like in Koreader
 - Possibility to hide on screen keyboard when using it with external keyboard
@@ -28,6 +29,14 @@ The plugin is text-focused. Illustrations packed into a game's blorb *are* avail
 To install, copy the contents of the release to the `koreader/plugins` folder.
 
 To run, click on *Interactive fiction* in the *Tools* menu.
+
+### Finding games
+
+*Find games on IFDB…* opens a browser for the [Interactive Fiction Database](https://ifdb.org) (needs Wi-Fi):
+
+- Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me* — limited to Z-machine and/or Glulx games (tap *Formats* to choose)
+- *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
+- Tap a game for its description, rating, play time and tags, its cover, and **Download**. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
 
 Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git` (Glulx), under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
@@ -56,7 +65,7 @@ By the end of the decade it became replaced by the point and click adventure gam
 
 However the genre survived in the shadow, further developed by enthousiasts - it still provides some gameplay mechanics that no other genre offers. *Counterfeit Monkey* takes you to the island of linguistics, where you can manipulate words instead of objects; *Coloratura* presents our world through the eyes of an alien creature, who sees emotions and energies instead of light and so on. What's best: these games are mostly free!
 
-To get IF games, check out one of the dedicated websites: [IFDB](https://ifdb.org/search?browse) or [IFWiki](https://www.ifwiki.org/Special:Drilldown/Games)
+To get IF games, use the plugin's *Find games on IFDB…* entry, or check out one of the dedicated websites: [IFDB](https://ifdb.org/search?browse) or [IFWiki](https://www.ifwiki.org/Special:Drilldown/Games)
 
 ---
 

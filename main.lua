@@ -105,6 +105,11 @@ function Frotz:_buildMenuItems()
         callback = function() self:_openFileBrowser() end,
     })
 
+    table.insert(items, {
+        text     = _("Find games on IFDB…"),
+        callback = function() self:_openIfdbBrowser() end,
+    })
+
     local recent = self:_buildRecentSubmenu()
     if #recent > 0 then
         table.insert(items, {
@@ -207,6 +212,17 @@ function Frotz:_openFileBrowser()
             end
             self:_startGame(file_path)
         end,
+    })
+end
+
+-- ── IFDB browser ──────────────────────────────────────────────────────────────
+
+function Frotz:_openIfdbBrowser()
+    self:_loadSettings()
+    local IfdbBrowser = require("ifdbbrowser")
+    UIManager:show(IfdbBrowser:new{
+        settings = self._settings,
+        on_play  = function(path) self:_startGame(path) end,
     })
 end
 
