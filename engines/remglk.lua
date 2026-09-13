@@ -333,6 +333,10 @@ function RemGlk:_normalize(obj)
     update.savestate    = obj.savestate
     update.restorestate = obj.restorestate
     update.undo         = obj.undo
+    -- Twine player extras: the story's own title (first update only), and
+    -- whether this page is the same passage visit changed in place.
+    if type(obj.title) == "string" and obj.title ~= "" then update.title = obj.title end
+    update.samepage = obj.samepage == true
 
     if obj.exit == true then update.exited = true end
     return update

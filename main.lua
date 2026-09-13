@@ -15,6 +15,7 @@ local T               = require("ffi/util").template
 local Screen          = require("device").screen
 
 local Resolver  = require("engines/resolver")
+local GameLibrary = require("gamelibrary")
 local monoface  = require("monoface")
 local rapidjson = require("rapidjson")
 
@@ -150,12 +151,16 @@ function Frotz:_buildRecentSubmenu()
     local list  = self:_recentGames()
     local kept  = {}
     local items = {}
+    local library = GameLibrary.open()
     for _idx, path in ipairs(list) do
         if lfs.attributes(path, "mode") == "file" then
             table.insert(kept, path)
             local _dir, fname = util.splitFilePathName(path)
+            -- A known title (from IFDB, or one a Twine story reported) reads
+            -- better than a file name like "index.html".
+            local entry = library:get(path)
             table.insert(items, {
-                text      = fname,
+                text      = (entry and entry.title) or fname,
                 mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
                             and _("saved") or nil,
                 callback  = function() self:_startGame(path) end,
@@ -290,6 +295,9 @@ function Frotz:_startGame(gamefile)
 
     -- Per-game save directory holds the numbered slots and the autosave.
     local _dir, fname   = util.splitFilePathName(gamefile)
+    local library       = GameLibrary.open()
+    local known         = library:get(gamefile)
+    local known_title   = known and known.title
     local save_dir      = self:_saveDirFor(gamefile)
     util.makePath(save_dir)
     local autosave_path = self:_autosavePathFor(gamefile)
@@ -326,7 +334,13 @@ function Frotz:_startGame(gamefile)
 
         local game_view = GameView:new{
             engine       = engine,
-            game_title   = fname,
+            game_title   = known_title or fname,
+            -- An IFDB title stays; otherwise a story's own title (Twine)
+            -- replaces the file name and is remembered for the recent list.
+            keep_title   = known ~= nil and known.source == "ifdb" and known_title ~= nil,
+            on_title     = function(story_title)
+                library:put(gamefile, { title = story_title })
+            end,
             game_path    = gamefile,
             font_size    = font_size,
             cols         = cols,

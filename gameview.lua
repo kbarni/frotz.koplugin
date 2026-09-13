@@ -81,6 +81,10 @@ local TAP_HINT_PATTERN = "\n*%[Tap to continue…%]%s*$"
 -- screen is live (games write "Press SPACE" and nothing else). It spells out
 -- both routes because a tap can only ever mean Space: a menu that wants a
 -- particular key (Six's "press 1-5") is answered from the command field.
+-- When a Twine page changes in place, paging resumes this many already-read
+-- lines above the first change, so the change is seen in context.
+local PAGE_CONTEXT_LINES = 2
+
 local KEY_HINT         = "[Press a key: tap = Space, or type one below]"
 local KEY_HINT_PATTERN = "\n*%[Press a key: tap = Space, or type one below%]%s*$"
 
@@ -130,6 +134,11 @@ local GameView = FrameContainer:extend{
     link_mode   = false,
     state_saves = false,
     save_ext    = ".qzl",
+    -- A story that reports its own title (Twine) renames the title bar and
+    -- tells the caller through on_title(title) — unless keep_title is set
+    -- (the caller already has an authoritative title, e.g. from IFDB).
+    on_title    = nil,
+    keep_title  = false,
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -992,6 +1001,8 @@ function GameView:_applyUpdate(u)
         return
     end
 
+    if u.title then self:_setStoryTitle(u.title) end
+
     -- A Twine page re-sent unchanged (a (live:) tick that changed nothing, a
     -- save's reply) must not cost an e-ink repaint: keep the page as it is and
     -- just take the new input request.
@@ -1022,6 +1033,7 @@ function GameView:_applyUpdate(u)
     end
 
     self._turn_buf = self:_storyToBuf(u)
+    self._same_page = self.link_mode and u.samepage == true
 
     self:_takeInput(u)
 
@@ -1055,6 +1067,14 @@ function GameView:_takeInput(u)
         self._input_links = false
         self._links       = {}
     end
+end
+
+function GameView:_setStoryTitle(title)
+    if self.keep_title or title == self.game_title then return end
+    self.game_title = title
+    self._title_bar:setTitle(title)
+    UIManager:setDirty(self, "ui")
+    if self.on_title then self.on_title(title) end
 end
 
 function GameView:_reportUndo(u)
@@ -1158,11 +1178,39 @@ function GameView:_finishTurn()
     buf = buf:gsub("\n?>[ \t]*$", "")   -- drop a trailing game prompt char
     buf = buf:gsub("%s+$", "")
 
-    self._pending_lines = {}
+    local lines = {}
     if buf ~= "" then
         for line in (buf .. "\n"):gmatch("(.-)\n") do
-            table.insert(self._pending_lines, line)
+            lines[#lines + 1] = line
         end
+    end
+
+    -- The Twine player re-sends the whole passage when a link reveals text or
+    -- timed text appears. Don't make the reader page through it again: lines
+    -- they already saw that are unchanged go straight into the transcript, and
+    -- paging resumes a little above the first change.
+    local prefill = 0
+    if self._same_page and self._turn_lines then
+        local seen = math.min(self._revealed_count or 0, #self._turn_lines, #lines)
+        local same = 0
+        while same < seen and self._turn_lines[same + 1] == lines[same + 1] do
+            same = same + 1
+        end
+        prefill = math.max(0, same - PAGE_CONTEXT_LINES)
+    end
+    self._same_page = false
+    self._turn_lines = lines
+    self._revealed_count = prefill
+
+    self._pending_lines = {}
+    for i = prefill + 1, #lines do
+        self._pending_lines[#self._pending_lines + 1] = lines[i]
+    end
+    if prefill > 0 then
+        if self.transcript ~= "" then
+            self.transcript = self.transcript .. "\n"
+        end
+        self.transcript = self.transcript .. table.concat(lines, "\n", 1, prefill)
     end
     self:_revealNextPage()
 end
@@ -1199,6 +1247,7 @@ function GameView:_revealNextPage()
     while #revealed < n and #self._pending_lines > 0 do
         table.insert(revealed, table.remove(self._pending_lines, 1))
     end
+    self._revealed_count = (self._revealed_count or 0) + #revealed
     if #revealed > 0 then
         if self.transcript ~= "" then
             self.transcript = self.transcript .. "\n"

@@ -18,6 +18,23 @@ const SYS_RESTART = 1000002;
 
 const proto = new Protocol();
 let engine = null;
+let lastMoment = null;
+let titleSent = false;
+
+// Extension fields on an update: the story's own title (once), and whether this
+// page is the same passage visit changed in place (a reveal, a timed insert, a
+// text field) — the plugin then keeps the reader's position instead of starting
+// the passage over. A new passage, an undo or a restore is a different moment.
+function pageExtra(extra) {
+    const out = Object.assign({}, extra);
+    if (engine.current === lastMoment) out.samepage = true;
+    lastMoment = engine.current;
+    if (!titleSent && engine.story.name) {
+        out.title = engine.story.name;
+        titleSent = true;
+    }
+    return out;
+}
 
 function screenRuns() {
     const runs = engine.screen();
@@ -39,7 +56,7 @@ function sendScreen(extra) {
         runs: screenRuns(),
         line: !!engine.lineRequest,
         timer: engine.nextTimerDelay(),
-        extra,
+        extra: pageExtra(extra),
     });
 }
 
@@ -53,7 +70,7 @@ const io = {
         if (def) runs.push({ text: ` (${def})`, style: "normal", link: 0 });
         let extra;
         for (;;) {
-            proto.update({ runs, line: true, timer: null, extra });
+            proto.update({ runs, line: true, timer: null, extra: pageExtra(extra) });
             extra = undefined;
             const ev = proto.read();
             if (ev === null) std.exit(0);
