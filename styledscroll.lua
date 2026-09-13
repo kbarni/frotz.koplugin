@@ -12,7 +12,8 @@
 -- (a fresh cmap lookup, since glyph IDs differ between the variant TTFs) and
 -- place it at XText's computed position.
 --
--- Style markers come from ptfwrap.lua (PTF_HEADER + bold/italic span markers).
+-- Style markers come from ptfwrap.lua (PTF_HEADER + bold/italic span markers,
+-- and link markers carrying a link id — drawn underlined, see _ptf_link).
 -- We strip them before stock init so the stock (bold-only) PTF path is bypassed
 -- and XText shapes clean text; we keep a per-char style + codepoint map aligned
 -- with XText's text_index (1-based char position in the cleaned text).
@@ -61,30 +62,44 @@ function StyledTextBox:_parseStyleMarkers()
     local chars = util.splitToChars(self.text)
     table.remove(chars, 1)  -- drop PTF_HEADER
 
-    local style, code = {}, {}
-    local is_b, is_i = false, false
+    local style, code, links = {}, {}, {}
+    local is_b, is_i, link, reading_id = false, false, nil, false
     local out, idx = {}, 0
     for _, ch in ipairs(chars) do
-        if ch == ptf.PTF_BOLD_START then
-            is_b = true
-        elseif ch == ptf.PTF_BOLD_END then
-            is_b = false
-        elseif ch == ptf.PTF_ITALIC_START then
-            is_i = true
-        elseif ch == ptf.PTF_ITALIC_END then
-            is_i = false
+        local digit = reading_id and ptf.link_digit(ch)
+        if digit then
+            link = (link or 0) * 10 + digit
         else
-            idx = idx + 1
-            out[idx] = ch
-            if is_b or is_i then
-                style[idx] = is_b and (is_i and "bi" or "b") or "i"
-                code[idx]  = utf8_codepoint(ch)
+            reading_id = false
+            if ch == ptf.PTF_BOLD_START then
+                is_b = true
+            elseif ch == ptf.PTF_BOLD_END then
+                is_b = false
+            elseif ch == ptf.PTF_ITALIC_START then
+                is_i = true
+            elseif ch == ptf.PTF_ITALIC_END then
+                is_i = false
+            elseif ch == ptf.PTF_LINK_START then
+                link, reading_id = nil, true
+            elseif ch == ptf.PTF_LINK_END then
+                link = nil
+            else
+                idx = idx + 1
+                out[idx] = ch
+                if is_b or is_i then
+                    style[idx] = is_b and (is_i and "bi" or "b") or "i"
+                    code[idx]  = utf8_codepoint(ch)
+                end
+                if link then links[idx] = link end
             end
         end
     end
     self.text = table.concat(out)
     self._ptf_style = style
     self._ptf_code  = code
+    -- Link id per character (same indexing), read by GameView to map a tap
+    -- to a link and used below to underline link text.
+    self._ptf_link  = links
     -- Keep the marker-free characters: `out[i]` lines up with XText's
     -- text_index (and with the charlist stock TextBoxWidget builds when XText
     -- is off), so a caller holding a line's offset/end_offset can slice the
@@ -181,6 +196,16 @@ function StyledTextBox:_renderText(start_row_idx, end_row_idx)
                                         y - glyph.t - xglyph.y_offset,
                                         0, 0, glyph.bb:getWidth(), glyph.bb:getHeight(), color)
                         end
+                    end
+                end
+                -- Links are underlined, spaces between their words included.
+                if self._ptf_link[xglyph.text_index] and (xglyph.x_advance or 0) > 0 then
+                    local thick = math.max(1, math.floor(self.line_height_px / 18))
+                    local uy = y + math.max(1, math.floor(self.line_height_px / 9))
+                    if not color_fg then
+                        self._bb:paintRect(xglyph.x0, uy, xglyph.x_advance, thick, self.fgcolor)
+                    else
+                        self._bb:paintRectRGB32(xglyph.x0, uy, xglyph.x_advance, thick, self.fgcolor)
                     end
                 end
             end

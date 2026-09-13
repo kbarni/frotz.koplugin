@@ -121,6 +121,31 @@ function RemGlk:send_char(window, key)
     }) .. "\n")
 end
 
+-- A tap on a link. RemGlk carries link ids as plain numbers; the id alone
+-- identifies the link, the window is the one the input request named.
+function RemGlk:send_hyperlink(window, value)
+    self.transport:send(self.json.encode({
+        type = "hyperlink", gen = self._gen,
+        window = window or self._input_window, value = value,
+    }) .. "\n")
+end
+
+-- Twine player extensions (twine/protocol.js): a Twine story has no save verb,
+-- so the display layer asks the player to write or read its state directly.
+-- The next update carries the outcome under the same key ({ok, message}).
+-- A Glk VM would reject these; only send them to the Twine player.
+function RemGlk:send_savestate(path)
+    self.transport:send(self.json.encode({ type = "savestate", gen = self._gen, path = path }) .. "\n")
+end
+
+function RemGlk:send_restorestate(path)
+    self.transport:send(self.json.encode({ type = "restorestate", gen = self._gen, path = path }) .. "\n")
+end
+
+function RemGlk:send_undo()
+    self.transport:send(self.json.encode({ type = "undo", gen = self._gen }) .. "\n")
+end
+
 -- Timer events are the DISPLAY layer's job in RemGlk: when a game asks for them
 -- the VM emits an update requesting no input at all and simply waits for us to
 -- send this. Without it such a turn hangs forever with input disabled.
@@ -245,6 +270,21 @@ function RemGlk:_normalize(obj)
     end
     update.status = self._status
 
+    -- This update's links in reading order, so a link can also be chosen by
+    -- number or text rather than a tap.
+    local links, by_id = {}, {}
+    for _, run in ipairs(update.story) do
+        local id = run.hyperlink
+        if id and id ~= 0 then
+            if not by_id[id] then
+                by_id[id] = { id = id, text = "" }
+                links[#links + 1] = by_id[id]
+            end
+            by_id[id].text = by_id[id].text .. run.text
+        end
+    end
+    update.links = links
+
     -- Track the update's gen as the default to echo (a specialresponse uses this;
     -- a line/char input below overrides it with the input entry's own gen).
     if obj.gen ~= nil then self._gen = obj.gen end
@@ -258,11 +298,20 @@ function RemGlk:_normalize(obj)
     end
 
     -- Turn boundary: the input request. line / char come in the input[] array.
+    -- A hyperlink request is a flag on an entry, with or without a type: the
+    -- Twine player asks for a link alone (rgdata.c prints no "type" then).
     for _, inp in ipairs(obj.input or {}) do
-        if inp.type == "line" or inp.type == "char" then
+        local typed = inp.type == "line" or inp.type == "char"
+        if typed or inp.hyperlink == true then
             self._gen = inp.gen
             self._input_window = inp.id
-            update.input = { kind = inp.type, window = inp.id, gen = inp.gen, maxlen = inp.maxlen }
+            update.input = {
+                kind      = typed and inp.type or nil,
+                window    = inp.id,
+                gen       = inp.gen,
+                maxlen    = inp.maxlen,
+                hyperlink = inp.hyperlink == true,
+            }
             break
         end
     end
@@ -279,6 +328,11 @@ function RemGlk:_normalize(obj)
             gen      = obj.gen,
         }
     end
+
+    -- Outcomes of the Twine player's savestate / restorestate / undo events.
+    update.savestate    = obj.savestate
+    update.restorestate = obj.restorestate
+    update.undo         = obj.undo
 
     if obj.exit == true then update.exited = true end
     return update

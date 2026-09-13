@@ -4,10 +4,11 @@ This plugin allows to play interactive fiction games in Koreader.
 
 ![Screenshot](Screenshot_frotz2.png)
 
-It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Two virtual machines are driven by the one engine, selected by file extension:
+It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Three interpreters are driven by the one engine, selected by file extension:
 
 - **Bocfel** — [Z-machine](https://www.ifwiki.org/Z-machine) games: `.z1`–`.z8`, `.zblorb`, `.zlb`, `.dat` (the most common interactive-fiction format)
 - **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.glb`, `.blb`, `.blorb`
+- **Twine player** — [Twine](https://twinery.org) stories, published as a single `.html`/`.htm` file (Harlowe, SugarCube, Chapbook and Snowman), run by the plugin's own JavaScript player on [QuickJS](https://bellard.org/quickjs/)
 
 The plugin is text-focused. Illustrations packed into a game's blorb *are* available — the story shows a tappable `[Illustration 3]` line where the game draws a picture, and tapping it (or the menu's **Illustrations** entry) opens it full screen with pan and zoom. What the plugin does not do is lay pictures out inside the text or paint the graphics windows some Glulx games use for maps and borders; for that, use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
 
@@ -15,6 +16,7 @@ The plugin is text-focused. Illustrations packed into a game's blorb *are* avail
 
 - Should work on most platforms where Koreader is available
 - Z-machine **and** Glulx (modern Inform 7) games support
+- Twine (choice-based) stories: tap a link to follow it, or type its number or text; *Undo* in the menu
 - Native KOReader rendering: status bar, styled text, single-key and line input
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
 - Recent games list, so you can pick up a game you played before without browsing for it again
@@ -38,7 +40,15 @@ To run, click on *Interactive fiction* in the *Tools* menu.
 - *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
 - Tap a game for its description, rating, play time and tags, its cover, and **Download**. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
 
-Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git` (Glulx), under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
+### Twine stories
+
+Open a Twine game's `.html` file like any other game. Links are underlined; tap one (or type its number or its text in the command field). Text boxes open the keyboard, timed text appears when it is due, and *Save*, *Restore*, *Undo* and autosave work as for other games.
+
+Twine formats are web pages, and KOReader has no web browser, so the plugin plays them with its own reimplementation of the story formats. Most choice-based stories work. What does not: page styling and layout (CSS), images (their alt text is shown), sound, animations, and games that rely on their own JavaScript to change the page.
+
+> For now the Twine player's `qjs` binary is only included for `x86_64` (desktop and the KOReader emulator); device builds are coming.
+
+Each architecture ships the interpreter binaries `bocfel` (Z-machine), `git` (Glulx) and `qjs` (QuickJS, for Twine) under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
 | Folder | Architecture | Devices |
 |--------|--------------|---------|
@@ -55,6 +65,7 @@ On some devices you need to make the binaries **executable**. Open the terminal 
 cd Koreader/plugins/frotz.koplugin/binaries/<arch>
 chmod +x bocfel
 chmod +x git
+chmod +x qjs
 ```
 
 ## About interactive fiction games
@@ -81,6 +92,7 @@ The interpreters are bundled as separate binaries, each under its own license:
 - **[Bocfel](https://github.com/garglk/garglk/tree/master/terps/bocfel)** — Z-machine VM by Chris Spiegel
 - **[Git](https://github.com/DavidKinder/Git)** — Glulx VM by Iain Merrick
 - **[RemGlk](https://github.com/erkyrath/remglk)** — the JSON Glk I/O layer by Andrew Plotkin
+- **[QuickJS](https://bellard.org/quickjs/)** — JavaScript engine by Fabrice Bellard and Charlie Gordon (MIT), which runs the Twine player
 
 ## License
 

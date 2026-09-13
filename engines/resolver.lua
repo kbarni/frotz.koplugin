@@ -1,8 +1,10 @@
 -- engines/resolver.lua — file extension → interpreter VM mapping.
 --
--- One RemGlk protocol, two VMs, selected purely by extension:
+-- One RemGlk protocol, selected purely by extension:
 --   bocfel — Z-machine  (.z1–.z8, .zblorb, .dat)
 --   git    — Glulx      (.ulx, .gblorb, .blb)
+--   twine  — Twine HTML (.html, .htm), played by qjs + twine/player.js, which
+--            speaks the same JSON (the binary is "qjs", see main.lua)
 -- This is a pure module (no KOReader requires) so it is unit-testable headless;
 -- main.lua layers the arch/filesystem binary lookup on top.
 
@@ -16,6 +18,8 @@ Resolver.VM_BY_EXT = {
     zblorb = "bocfel", zlb = "bocfel", dat = "bocfel",
     -- Glulx → git
     ulx = "git", gblorb = "git", glb = "git", blb = "git", blorb = "git",
+    -- Twine (any HTML file is offered; the player reports a non-Twine one)
+    html = "twine", htm = "twine",
 }
 
 -- The lowercased extension of a filename/path, or nil.

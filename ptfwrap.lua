@@ -16,6 +16,11 @@
 --   everything else            → normal
 -- (blockquote indent / inline color are deferred.)
 --
+-- Hyperlinks travel the same way: a link-start marker followed by the link id
+-- written in private-use "digits", then the text, then a link-end marker. The
+-- id rides along through wrapping and pagination, and styledscroll.lua turns
+-- it back into a per-character link map for underlining and taps.
+--
 -- We insert markers, word-wrap to a column count (markers are zero-width and
 -- never counted), and RE-BALANCE each style per physical line: every output
 -- line opens and closes its own bold/italic spans. That keeps a span from
@@ -30,6 +35,24 @@ M.PTF_BOLD_START    = "\239\191\178"  -- U+FFF2
 M.PTF_BOLD_END      = "\239\191\179"  -- U+FFF3
 M.PTF_ITALIC_START  = "\239\191\180"  -- U+FFF4
 M.PTF_ITALIC_END    = "\239\191\181"  -- U+FFF5
+M.PTF_LINK_START    = "\239\191\182"  -- U+FFF6  then the id's digits
+M.PTF_LINK_END      = "\239\191\183"  -- U+FFF7
+
+-- Link id digits are U+E000..U+E009 (UTF-8 EE 80 80..89).
+function M.encode_link_id(id)
+    return (tostring(math.floor(id)):gsub("%d", function(d)
+        return "\238\128" .. string.char(128 + tonumber(d))
+    end))
+end
+
+-- The digit a link-id character stands for, or nil.
+function M.link_digit(c)
+    if #c == 3 and c:byte(1) == 238 and c:byte(2) == 128 then
+        local d = c:byte(3) - 128
+        if d >= 0 and d <= 9 then return d end
+    end
+    return nil
+end
 
 -- Glk styles that map to bold / italic on the monospace e-ink transcript.
 M.BOLD_STYLES   = { header = true, subheader = true, alert = true }
@@ -58,16 +81,20 @@ function M.runs_to_marked(story)
     local out = {}
     for _, run in ipairs(story) do
         if run.style ~= "input" and run.text then
+            local text = run.text
+            if run.hyperlink and run.hyperlink ~= 0 then
+                text = M.PTF_LINK_START .. M.encode_link_id(run.hyperlink) .. text .. M.PTF_LINK_END
+            end
             if M.BOLD_STYLES[run.style] then
                 out[#out + 1] = M.PTF_BOLD_START
-                out[#out + 1] = run.text
+                out[#out + 1] = text
                 out[#out + 1] = M.PTF_BOLD_END
             elseif M.ITALIC_STYLES[run.style] then
                 out[#out + 1] = M.PTF_ITALIC_START
-                out[#out + 1] = run.text
+                out[#out + 1] = text
                 out[#out + 1] = M.PTF_ITALIC_END
             else
-                out[#out + 1] = run.text
+                out[#out + 1] = text
             end
         end
     end
@@ -82,19 +109,30 @@ function M.wrap(marked, cols)
     cols = cols or 64
     marked = marked:gsub("\r", "")
 
-    -- Decode to tokens {ch, b, i}, stripping markers and tracking style state.
-    local toks, bold, ital = {}, false, false
+    -- Decode to tokens {ch, b, i, l}, stripping markers and tracking style
+    -- and link state (l = link id or nil).
+    local toks, bold, ital, link, reading_id = {}, false, false, nil, false
     for _, c in ipairs(split_chars(marked)) do
-        if c == M.PTF_BOLD_START then
-            bold = true
-        elseif c == M.PTF_BOLD_END then
-            bold = false
-        elseif c == M.PTF_ITALIC_START then
-            ital = true
-        elseif c == M.PTF_ITALIC_END then
-            ital = false
+        local digit = reading_id and M.link_digit(c)
+        if digit then
+            link = (link or 0) * 10 + digit
         else
-            toks[#toks + 1] = { ch = c, b = bold, i = ital }
+            reading_id = false
+            if c == M.PTF_BOLD_START then
+                bold = true
+            elseif c == M.PTF_BOLD_END then
+                bold = false
+            elseif c == M.PTF_ITALIC_START then
+                ital = true
+            elseif c == M.PTF_ITALIC_END then
+                ital = false
+            elseif c == M.PTF_LINK_START then
+                link, reading_id = nil, true
+            elseif c == M.PTF_LINK_END then
+                link = nil
+            else
+                toks[#toks + 1] = { ch = c, b = bold, i = ital, l = link }
+            end
         end
     end
 
@@ -113,7 +151,11 @@ function M.wrap(marked, cols)
             emit_line()
         end
         if line_len > 0 then
-            line[#line + 1] = { ch = " ", b = false, i = false }
+            -- The space between two words of one link belongs to the link, so
+            -- its underline (and tap target) doesn't break mid-link.
+            local prev = line[#line]
+            local l = (prev and prev.l and word[1] and word[1].l == prev.l) and prev.l or nil
+            line[#line + 1] = { ch = " ", b = false, i = false, l = l }
             line_len = line_len + 1
         end
         for _, t in ipairs(word) do line[#line + 1] = t end
@@ -144,11 +186,17 @@ function M.wrap(marked, cols)
     if line_len > 0 then emit_line() end
 
     -- Render each line, opening/closing each style within the line only. Bold
-    -- and italic are independent spans (a char can be both → bolditalic).
+    -- and italic are independent spans (a char can be both → bolditalic);
+    -- links re-open with their id on every line they cover.
     local rendered = {}
     for _, ln in ipairs(lines) do
-        local parts, cb, ci = {}, false, false
+        local parts, cb, ci, cl = {}, false, false, nil
         for _, t in ipairs(ln) do
+            if t.l ~= cl then
+                if cl then parts[#parts + 1] = M.PTF_LINK_END end
+                if t.l then parts[#parts + 1] = M.PTF_LINK_START .. M.encode_link_id(t.l) end
+                cl = t.l
+            end
             if t.b and not cb then
                 parts[#parts + 1] = M.PTF_BOLD_START; cb = true
             elseif (not t.b) and cb then
@@ -163,6 +211,7 @@ function M.wrap(marked, cols)
         end
         if cb then parts[#parts + 1] = M.PTF_BOLD_END end
         if ci then parts[#parts + 1] = M.PTF_ITALIC_END end
+        if cl then parts[#parts + 1] = M.PTF_LINK_END end
         rendered[#rendered + 1] = table.concat(parts)
     end
     return table.concat(rendered, "\n")

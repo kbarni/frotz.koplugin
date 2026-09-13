@@ -54,7 +54,9 @@ local _arch = detect_arch()
 local function binary_for(vm)
     -- detect_arch() now reliably distinguishes armel/armhf/x86_64, so the binary
     -- lives at exactly one path. No arch-guessing fallbacks needed.
-    local path = _plugin_dir .. "/binaries/" .. _arch .. "/" .. vm
+    -- Twine stories run on QuickJS (qjs) with the plugin's own player script.
+    local exe = (vm == "twine") and "qjs" or vm
+    local path = _plugin_dir .. "/binaries/" .. _arch .. "/" .. exe
     if lfs.attributes(path, "mode") then return path end
     return nil
 end
@@ -198,7 +200,7 @@ function Frotz:_openFileBrowser()
     UIManager:show(PathChooser:new{
         select_directory = false,
         path             = start_dir,
-        -- Show both Z-machine and Glulx games (resolved by extension).
+        -- Show Z-machine, Glulx and Twine games (resolved by extension).
         -- KOReader's FileChooser reads this as `file_filter` (not `filter_func`),
         -- and only honours it when `show_unsupported` is false.
         show_unsupported = false,
@@ -236,8 +238,13 @@ function Frotz:_saveDirFor(gamefile)
     return DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
 end
 
+-- Glk VMs write their own save format; the Twine player writes JSON.
+local function save_ext_for(gamefile)
+    return Resolver.vm_for(gamefile) == "twine" and ".json" or ".qzl"
+end
+
 function Frotz:_autosavePathFor(gamefile)
-    return self:_saveDirFor(gamefile) .. "/autosave.qzl"
+    return self:_saveDirFor(gamefile) .. "/autosave" .. save_ext_for(gamefile)
 end
 
 function Frotz:_startGame(gamefile)
@@ -289,8 +296,22 @@ function Frotz:_startGame(gamefile)
 
     -- bocfel re-plays the whole transcript ("[Starting history playback]") on a
     -- verb restore unless -H is given; git (Glulx) has no such replay and rejects
-    -- the flag, so only pass it to bocfel.
-    local extra_args = (vm == "bocfel") and { "-H" } or nil
+    -- the flag, so only pass it to bocfel. qjs takes the Twine player script
+    -- first, then the story file.
+    local is_twine = vm == "twine"
+    local extra_args = nil
+    if vm == "bocfel" then
+        extra_args = { "-H" }
+    elseif is_twine then
+        local player = _plugin_dir .. "/twine/player.js"
+        if not lfs.attributes(player, "mode") then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Twine player not found: %1"), player),
+            })
+            return
+        end
+        extra_args = { player }
+    end
 
     local function launch(auto_restore)
         local ok, transport = pcall(Session.new, Session, binary, gamefile, extra_args)
@@ -312,6 +333,9 @@ function Frotz:_startGame(gamefile)
             settings     = self._settings,
             save_dir     = save_dir,
             auto_restore = auto_restore,
+            link_mode    = is_twine,
+            state_saves  = is_twine,
+            save_ext     = save_ext_for(gamefile),
             -- The hosting FileManager/ReaderUI register a "dictionary" module;
             -- passing ui through enables hold-to-look-up in the transcript.
             ui           = self.ui,
