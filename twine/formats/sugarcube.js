@@ -230,7 +230,8 @@ class Parser {
             if (!m) return null;
             const pipe = m[1].indexOf("|");
             const title = pipe >= 0 ? m[1].slice(0, pipe) : "";
-            return { node: { t: "image", title, target: m[2], setter: m[3] }, end: i + m[0].length };
+            const src = pipe >= 0 ? m[1].slice(pipe + 1) : m[1];
+            return { node: { t: "image", title, src, target: m[2], setter: m[3] }, end: i + m[0].length };
         }
         const e = s.indexOf("]]", i + 2);
         if (e < 0) return null;
@@ -627,16 +628,22 @@ export class SugarCube {
                 case "hr": w.text("\u2014 \u2014 \u2014"); break;
                 case "inline": this.renderNodes(n.nodes, w); break;
                 case "link": this.renderLinkNode(n, w); break;
-                case "image":
+                case "image": {
+                    // [img[$var]]: a source that is a variable is looked up.
+                    const draw = (iw) => this.guard(iw, "[img[" + n.src + "]]", () => {
+                        const src = /^[$_][\w$.]*$/.test(n.src.trim()) ? this.evaluate(n.src.trim()) : n.src;
+                        this.engine.image(iw, { src, alt: n.title });
+                    });
                     if (n.target) {
-                        this.engine.addLink(w, "[" + (n.title || "Image") + "]", () => {
+                        this.engine.addLink(w, draw, () => {
                             if (n.setter) this.run(n.setter);
                             this.engine.goto(n.target);
                         });
-                    } else if (n.title) {
-                        w.text("[" + n.title + "]");
+                    } else {
+                        draw(w);
                     }
                     break;
+                }
                 case "naked": this.guard(w, n.expr, () => this.printValue(this.evaluate(n.expr), w, false)); break;
                 case "macro": this.guard(w, "<<" + n.name + ">>", () => this.macro(n, w)); break;
             }

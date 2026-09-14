@@ -4,6 +4,8 @@
 // HTML tags, links, and named regions. The result is a flat list of runs
 //   { text, style, link }          style = a Glk style name, link = id or 0
 //   { mark: "open"|"close", region }  zero-width region boundaries
+//   { text: "", img, style, link }    a picture (engine.image); img = { n, url,
+//                                     alt, width, height, align }
 // Regions are how "change the page later" works without a DOM: a revealed link,
 // a Harlowe named hook, a SugarCube <<replace "#id">> target, a timed insert —
 // each is a region whose runs the engine can splice.
@@ -52,7 +54,7 @@ export class Writer {
     _push(text, link) {
         const style = this.style();
         const last = this.runs[this.runs.length - 1];
-        if (last && last.mark === undefined && last.style === style && last.link === link) {
+        if (last && last.mark === undefined && !last.img && last.style === style && last.link === link) {
             last.text += text;
         } else {
             this.runs.push({ text, style, link });
@@ -97,6 +99,7 @@ export class Writer {
         for (let i = this.runs.length - 1; i >= 0; i--) {
             const r = this.runs[i];
             if (r.mark !== undefined) continue;
+            if (r.img) return n;
             for (let j = r.text.length - 1; j >= 0; j--) {
                 const c = r.text[j];
                 if (c === "\n") n++;
@@ -124,6 +127,12 @@ export class Writer {
         this.text("[" + message + "]");
         this.st.bold--;
         this.link = prev;
+    }
+
+    // A picture: a zero-width run that goes out as a Glk image span.
+    imageRun(img) {
+        if (this.st.hidden > 0) return;
+        this.runs.push({ text: "", img, style: this.style(), link: this.link });
     }
 
     beginStyle(key) { this.st[key]++; }
@@ -186,8 +195,7 @@ export class Writer {
             return;
         }
         if (name === "img") {
-            const alt = (attrs.alt || attrs.title || "").trim();
-            if (alt) this.text("[" + alt + "]");
+            this.engine.image(this, attrs);
             return;
         }
         if (VOID.has(name) || selfClosing) return;
@@ -274,6 +282,12 @@ export function visibleRuns(runs) {
     const out = [];
     let nl = -1;   // newlines just written; -1 = nothing written yet
     for (const r of runs) {
+        if (r.img) {
+            // Visible content, never merged; a copy, so the player can annotate it.
+            nl = 0;
+            out.push({ text: "", img: Object.assign({}, r.img), style: r.style, link: r.link });
+            continue;
+        }
         if (r.mark !== undefined || !r.text) continue;
         let s = "";
         for (const ch of r.text) {
@@ -292,11 +306,12 @@ export function visibleRuns(runs) {
         }
         if (s === "") continue;
         const last = out[out.length - 1];
-        if (last && last.style === r.style && last.link === r.link) last.text += s;
+        if (last && !last.img && last.style === r.style && last.link === r.link) last.text += s;
         else out.push({ text: s, style: r.style, link: r.link });
     }
     while (out.length) {
         const last = out[out.length - 1];
+        if (last.img) break;
         last.text = last.text.replace(/\s+$/, "");
         if (last.text !== "") break;
         out.pop();

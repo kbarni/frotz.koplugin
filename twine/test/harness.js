@@ -28,7 +28,7 @@ export function screenText(engine) {
     const links = [];
     let out = "";
     for (const r of runs) {
-        let t = r.text;
+        let t = r.img ? `<img ${r.img.n}${r.img.alt ? ": " + r.img.alt : ""}>` : r.text;
         if (r.style !== "normal") t = `<${r.style}>${t}</>`;
         if (r.link) {
             if (!links.includes(r.link)) links.push(r.link);

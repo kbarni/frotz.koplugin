@@ -1,4 +1,7 @@
-// twine/player.js — entry point: qjs player.js story.html
+// twine/player.js — entry point: qjs player.js [--images=DIR] story.html
+//
+// --images=DIR: where data: images are decoded to (the plugin passes a folder
+// in the game's save directory). Without it such images show their alt text.
 //
 // Runs as the plugin's child process exactly like bocfel/git: JSON events on
 // stdin, RemGlk-shaped JSON updates on stdout (see protocol.js). Every update
@@ -11,6 +14,7 @@ import { Engine } from "./engine.js";
 import { Protocol } from "./protocol.js";
 import { visibleRuns } from "./writer.js";
 import { createFormat } from "./formats/index.js";
+import { ImageTable } from "./images.js";
 
 // Links the player adds itself at a dead end. Far above any per-passage id.
 const SYS_UNDO = 1000001;
@@ -48,7 +52,7 @@ function screenRuns() {
         }
         runs.push({ text: "Restart", style: "normal", link: SYS_RESTART });
     }
-    return runs;
+    return engine.markSeen(runs);
 }
 
 function sendScreen(extra) {
@@ -64,7 +68,7 @@ const io = {
     // Blocks until the player types an answer. The passage is half rendered,
     // so saving or undoing is refused until the question is answered.
     askLine(eng, prompt, def) {
-        const runs = visibleRuns(eng.runs);
+        const runs = eng.markSeen(visibleRuns(eng.runs));
         runs.push({ text: "\n\n", style: "normal", link: 0 });
         runs.push({ text: String(prompt), style: "alert", link: 0 });
         if (def) runs.push({ text: ` (${def})`, style: "normal", link: 0 });
@@ -117,9 +121,11 @@ function main() {
     }
 
     let story;
+    const args = scriptArgs.slice(1);
+    const path = args.filter((a) => !a.startsWith("--")).pop();
+    const imagesArg = args.find((a) => a.startsWith("--images="));
     try {
-        const path = scriptArgs[1];
-        if (!path) throw new Error("usage: qjs player.js story.html");
+        if (!path) throw new Error("usage: qjs player.js [--images=DIR] story.html");
         const html = std.loadFile(path);
         if (html === null) throw new Error("Can't read " + path);
         story = extract(html);
@@ -129,6 +135,7 @@ function main() {
     }
 
     engine = new Engine(story, io, createFormat);
+    engine.images = new ImageTable(path, imagesArg ? imagesArg.slice("--images=".length) : null);
     // Author JavaScript calls Math.random directly; route it through the
     // engine's seeded generator so undo and saves replay the same rolls.
     Math.random = () => engine.rng.next();

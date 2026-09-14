@@ -31,6 +31,7 @@ local ptf              = require("ptfwrap")
 local monoface         = require("monoface")
 local StyledScroll     = require("styledscroll")
 local ImageStore       = require("imagestore")
+local TwineImages      = require("twineimages")
 
 -- Save slots shown in the Save/Restore pickers.  "autosave" is the slot written
 -- on close and offered at launch; the rest are manual slots.  The save files are
@@ -188,8 +189,11 @@ function GameView:init()
     -- read the game's own Blorb and let imagestore.lua decide which images earn
     -- a line of transcript; the placeholders it returns are tappable, and
     -- everything the story has drawn stays reachable from the menu.
+    -- A Twine story (link_mode) has no Blorb: its player puts each picture's
+    -- file on the span, and twineimages.lua stands in for the Blorb map.
     self._images = ImageStore.new{
         game_path = self.game_path,
+        map       = self.link_mode and TwineImages.new() or nil,
         max_width = self.cols,
         mode      = self.settings and self.settings:readSetting("image_mode"),
     }

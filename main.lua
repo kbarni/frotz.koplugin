@@ -198,6 +198,23 @@ end
 
 -- ── File browser ──────────────────────────────────────────────────────────────
 
+-- An .html file is a game only if it holds a Twine story, and finding out reads
+-- the file, so answers are remembered by path, size and modification time.
+-- true / false, or nil when the file can't be examined.
+local _twine_checked = {}
+local function is_twine_story(path)
+    local attr = lfs.attributes(path)
+    if not attr or attr.mode ~= "file" then return nil end
+    local known = _twine_checked[path]
+    if known and known.size == attr.size and known.mtime == attr.modification then
+        return known.ok
+    end
+    local ok = Resolver.is_twine_file(path)
+    if ok == nil then return nil end
+    _twine_checked[path] = { size = attr.size, mtime = attr.modification, ok = ok }
+    return ok
+end
+
 function Frotz:_openFileBrowser()
     self:_loadSettings()
     local start_dir = self._settings:readSetting("game_directory")
@@ -211,6 +228,16 @@ function Frotz:_openFileBrowser()
         show_unsupported = false,
         file_filter      = function(filename)
             return Resolver.is_supported(filename)
+        end,
+        -- file_filter gets only the name; an .html file must also hold a Twine
+        -- story, which takes the full path that FileChooser:show_file has. Set
+        -- here rather than after new(): the first listing happens in init.
+        show_file        = function(chooser, filename, fullpath)
+            if not PathChooser.show_file(chooser, filename, fullpath) then return false end
+            if fullpath and Resolver.vm_for(filename) == "twine" then
+                return is_twine_story(fullpath) == true
+            end
+            return true
         end,
         onConfirm = function(file_path)
             local dir = file_path:match("(.*)/")
@@ -262,6 +289,14 @@ function Frotz:_startGame(gamefile)
     if not vm then
         UIManager:show(InfoMessage:new{
             text = _("Unsupported game format: ") .. tostring(gamefile),
+        })
+        return
+    end
+    -- An HTML page that isn't a Twine story (a walkthrough, a web page) can
+    -- still arrive here, e.g. from Recent games: say so instead of starting.
+    if vm == "twine" and is_twine_story(gamefile) == false then
+        UIManager:show(InfoMessage:new{
+            text = T(_("This HTML file is not a Twine story:\n%1"), gamefile),
         })
         return
     end
@@ -318,7 +353,9 @@ function Frotz:_startGame(gamefile)
             })
             return
         end
-        extra_args = { player }
+        -- data: images are decoded into the game's save folder, not /tmp
+        -- (a small RAM disk on e-readers).
+        extra_args = { player, "--images=" .. save_dir .. "/images" }
     end
 
     local function launch(auto_restore)

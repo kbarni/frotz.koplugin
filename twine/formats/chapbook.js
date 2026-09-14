@@ -267,7 +267,10 @@ export class Chapbook {
                 });
                 return true;
             }
-            case "ambient sound": case "sound effect": case "embed image": case "embed youtube video":
+            case "embed image":
+                engine.image(w, { src: main, alt: props.alt ?? props.description });
+                return true;
+            case "ambient sound": case "sound effect": case "embed youtube video":
             case "embed vimeo video": case "embed flickr image": case "embed unsplash image":
             case "party": case "fade in":
                 return true;

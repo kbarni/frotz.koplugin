@@ -14,9 +14,23 @@
 import { Writer, visibleRuns } from "./writer.js";
 import { serialize, deserialize, Rng } from "./state.js";
 import { log } from "./protocol.js";
+import { ImageTable } from "./images.js";
 
 const MAX_UNDO = 100;
 const MAX_JUMPS = 50;
+
+// "640", "640px" → 640; "100%", "auto" → undefined.
+function pixels(v) {
+    const m = /^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(String(v ?? ""));
+    return m ? Math.round(Number(m[1])) : undefined;
+}
+
+// align="left" / style="float: right" → the Glk margin alignments.
+function alignment(attrs) {
+    const float = /float\s*:\s*(left|right)/i.exec(attrs.style || "");
+    const side = (float ? float[1] : String(attrs.align || "")).toLowerCase();
+    return side === "left" ? "marginleft" : side === "right" ? "marginright" : "inlineup";
+}
 
 // Thrown to stop rendering when the story jumps to another passage.
 export class GotoSignal {
@@ -29,6 +43,10 @@ export class Engine {
         this.io = io || {};
         this.createFormat = createFormat;
         this.rng = new Rng();
+        // The player replaces this with one that knows the story's folder and
+        // the cache for data: images; without them only remote images resolve.
+        this.images = new ImageTable(null, null);
+        this._shown = new WeakMap();   // moment -> Set of image numbers it showed
         this._reset();
         this.format = createFormat(this);
     }
@@ -243,6 +261,52 @@ export class Engine {
             if (this.format.onHtmlLink) this.format.onHtmlLink(target, attrs);
             this.goto(target);
         });
+    }
+
+    // A picture on the page (<img>, [img[…]], {embed image}, ![…](…)). attrs:
+    // src, alt/title, width, height, align/style. Images that only carry a
+    // script (onload/onerror tricks) are not pictures.
+    image(w, attrs) {
+        if (attrs.onload !== undefined || attrs.onerror !== undefined) return;
+        const alt = String(attrs.alt ?? attrs.title ?? "").trim();
+        const r = this.images.resolve(attrs.src, (name) => this.passage(name));
+        if (r.kind === "none") {
+            // What a browser shows for a broken image; a linked one needs a label.
+            if (alt || w.link) w.text("[" + (alt || "Image") + "]");
+            return;
+        }
+        w.imageRun({
+            n: this.images.number(r.url), url: r.url, alt,
+            width: pixels(attrs.width), height: pixels(attrs.height), align: alignment(attrs),
+        });
+    }
+
+    // Annotate a screen's pictures with how often each was already shown: on
+    // the earlier passage visits still on the undo stack, or earlier on this
+    // page. The plugin drops repeats (an icon on every passage) like it drops a
+    // Glulx game's redrawn ornaments, while a picture keeps its line when the
+    // same page is sent again, undone to, or rebuilt.
+    markSeen(runs) {
+        const earlier = new Map();
+        for (const m of this.moments) {
+            if (m === this.current) break;
+            const set = this._shown.get(m);
+            if (set) for (const n of set) earlier.set(n, (earlier.get(n) || 0) + 1);
+        }
+        let shown = this.current ? this._shown.get(this.current) : null;
+        if (!shown && this.current) {
+            shown = new Set();
+            this._shown.set(this.current, shown);
+        }
+        const onPage = new Map();
+        for (const r of runs) {
+            if (!r.img) continue;
+            const k = onPage.get(r.img.n) || 0;
+            r.img.seen = (earlier.get(r.img.n) || 0) + k;
+            onPage.set(r.img.n, k + 1);
+            if (shown) shown.add(r.img.n);
+        }
+        return runs;
     }
 
     activate(id) {

@@ -209,10 +209,18 @@ function RemGlk:_absorb_buffer(c, runs)
                     style = span.style or "normal",
                     hyperlink = span.hyperlink,
                 }
-            elseif span.special == "image" and self.image_hook then
-                local text, style = self.image_hook(span)
+            elseif span.special == "image" then
+                local text, style
+                if self.image_hook then text, style = self.image_hook(span) end
+                if not text and span.hyperlink then
+                    -- A picture that is a link (Twine) stays tappable even when
+                    -- it is not worth a placeholder of its own.
+                    local alt = type(span.alttext) == "string" and span.alttext ~= "" and span.alttext
+                    text, style = "[" .. (alt or "Image") .. "]", "normal"
+                end
                 if text then
-                    run, standalone = { text = text, style = style or "normal" }, true
+                    run, standalone = { text = text, style = style or "normal",
+                                        hyperlink = span.hyperlink }, true
                 end
             end
             -- image/setcolor/fill spans with no replacement are dropped; see

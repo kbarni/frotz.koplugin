@@ -77,7 +77,7 @@ export function renderMarkdown(engine, w, text, inline) {
 }
 
 export function renderInline(engine, w, text, inline) {
-    const re = /\[\[([\s\S]*?)\]\]|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|(?<![\w])_([^_\s][^_]*?)_(?![\w])|`([^`]+)`|~~([\s\S]+?)~~/g;
+    const re = /\[\[([\s\S]*?)\]\]|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|(?<![\w])_([^_\s][^_]*?)_(?![\w])|`([^`]+)`|~~([\s\S]+?)~~|!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+["'][^"']*["'])?\s*\)/g;
     let last = 0, m;
     const plain = (s) => (inline ? inline(s, w) : w.markup(s));
     while ((m = re.exec(text)) !== null) {
@@ -98,6 +98,8 @@ export function renderInline(engine, w, text, inline) {
             w.beginStyle("pre");
             w.text(m[6]);
             w.endStyle("pre");
+        } else if (m[9] !== undefined) {
+            engine.image(w, { src: m[9], alt: m[8] });
         } else {
             renderInline(engine, w, m[7], inline);
         }

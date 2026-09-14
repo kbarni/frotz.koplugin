@@ -5,6 +5,9 @@
 //   update:  {type:"update", gen, windows?, content:[{id, clear, text:[lines]}],
 //             input:[{id, gen, type?:"line", maxlen?, hyperlink:true}], timer?}
 //   line:    {content:[{style, text, hyperlink?}]}   or {} for a blank line
+//            an image is {special:"image", image, alignment, width?, height?,
+//            alttext?, hyperlink?} plus two extension fields: url (a file path
+//            or web address) and seen (earlier showings, see engine.markSeen)
 // Events in: init, hyperlink {value}, line {value}, timer — plus three
 // extensions only this player understands: savestate / restorestate {path},
 // undo. Their result rides back on the next update under the same key.
@@ -73,6 +76,19 @@ export class Protocol {
 function toLines(runs) {
     const lines = [[]];
     for (const r of runs) {
+        if (r.img) {
+            // A Glk image span, plus what only this player knows: the picture's
+            // file (or URL) and how often it was shown before (engine.markSeen).
+            const img = r.img;
+            const span = { special: "image", image: img.n, url: img.url,
+                           alignment: img.align || "inlineup", seen: img.seen || 0 };
+            if (img.alt) span.alttext = img.alt;
+            if (img.width) span.width = img.width;
+            if (img.height) span.height = img.height;
+            if (r.link) span.hyperlink = r.link;
+            lines[lines.length - 1].push(span);
+            continue;
+        }
         const parts = r.text.split("\n");
         for (let i = 0; i < parts.length; i++) {
             if (i > 0) lines.push([]);

@@ -87,6 +87,10 @@ local function jpeg_dims(buf)
     return nil
 end
 
+-- Also used for Twine pictures (twineimages.lua).
+M.png_dims  = png_dims
+M.jpeg_dims = jpeg_dims
+
 -- ── The map ─────────────────────────────────────────────────────────────────
 
 local Map = {}

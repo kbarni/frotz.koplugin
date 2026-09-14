@@ -21,7 +21,7 @@ The plugin is text-focused. Illustrations packed into a game's blorb *are* avail
 - Simple save and restore mechanism (per game and with slots), including autosave at closing
 - Recent games list, so you can pick up a game you played before without browsing for it again
 - Built-in game finder: browse and search [IFDB](https://ifdb.org), read a game's description and rating, download it and play
-- Illustrations from the game's blorb, opened full screen from the story or the menu
+- Illustrations from the game's blorb (or a Twine story's pictures), opened full screen from the story or the menu
 - Word lookup in dictionaries or Wikipedia, just like in Koreader
 - Possibility to hide on screen keyboard when using it with external keyboard
 - Font size setting
@@ -36,15 +36,18 @@ To run, click on *Interactive fiction* in the *Tools* menu.
 
 *Find games on IFDB…* opens a browser for the [Interactive Fiction Database](https://ifdb.org) (needs Wi-Fi):
 
-- Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me* — limited to Z-machine and/or Glulx games (tap *Formats* to choose)
+- Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me* — limited to the games the plugin plays: all, Z-machine + Glulx, Z-machine, Glulx or Twine (tap *Formats* to choose)
+- Twine games can be downloaded when IFDB lists an `.html` file or a zip (usually on the IF Archive); games published only as a web page (itch.io, philome.la) cannot
 - *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
 - Tap a game for its description, rating, play time and tags, its cover, and **Download**. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
 
 ### Twine stories
 
-Open a Twine game's `.html` file like any other game. Links are underlined; tap one (or type its number or its text in the command field). Text boxes open the keyboard, timed text appears when it is due, and *Save*, *Restore*, *Undo* and autosave work as for other games.
+Open a Twine game's `.html` file like any other game (*Open game…* lists only HTML files that contain a Twine story, so walkthroughs and other web pages stay hidden). Links are underlined; tap one (or type its number or its text in the command field). Text boxes open the keyboard, timed text appears when it is due, and *Save*, *Restore*, *Undo* and autosave work as for other games.
 
-Twine formats are web pages, and KOReader has no web browser, so the plugin plays them with its own reimplementation of the story formats. Most choice-based stories work. What does not: page styling and layout (CSS), images (their alt text is shown), sound, animations, and games that rely on their own JavaScript to change the page.
+Pictures work like blorb illustrations: a tappable `[Illustration 2: …]` line opens the picture full screen, small icons and repeated decorations are left out, and the menu's **Illustrations** entry lists them all. Pictures must be files next to the story (a zip from IFDB brings them along) or embedded in it; pictures on the web show only their description.
+
+Twine formats are web pages, and KOReader has no web browser, so the plugin plays them with its own reimplementation of the story formats. Most choice-based stories work. What does not: page styling and layout (CSS), pictures laid out inside the text, sound, animations, and games that rely on their own JavaScript to change the page.
 
 Each architecture ships the interpreter binaries `bocfel` (Z-machine), `git` (Glulx) and `qjs` (QuickJS, for Twine) under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
