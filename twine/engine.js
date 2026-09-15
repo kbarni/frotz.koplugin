@@ -341,6 +341,15 @@ export class Engine {
 
     regionExists(id) { return this._bounds(id) !== null; }
 
+    // Turn the runs of link `link` inside region `id` into plain text (a
+    // Twine 1 revision span that can't change any more).
+    unlinkRegion(id, link) {
+        const b = this._bounds(id);
+        if (!b) return false;
+        for (let i = b[0] + 1; i < b[1]; i++) if (this.runs[i].link === link) this.runs[i].link = 0;
+        return true;
+    }
+
     // Put a new region around every occurrence of `text` in plain (unlinked)
     // runs, so text on the page can be targeted like a named hook (Harlowe's
     // (click: "word"), (replace: "word")). Returns the region ids.

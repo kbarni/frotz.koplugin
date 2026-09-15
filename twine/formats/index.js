@@ -15,7 +15,7 @@ export function createFormat(engine) {
         case "sugarcube":
             return new SugarCube(engine, { legacy: story.formatVersion === "1" });
         case "twine1":        // Sugarcane / Jonah: SugarCube's ancestors
-            return new SugarCube(engine, { legacy: true });
+            return new SugarCube(engine, { legacy: true, twine1: true });
         case "chapbook":
             return new Chapbook(engine);
         case "snowman":

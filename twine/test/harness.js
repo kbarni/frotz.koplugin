@@ -5,9 +5,13 @@ import { extract } from "../extract.js";
 import { Engine } from "../engine.js";
 import { createFormat } from "../formats/index.js";
 
-export function loadEngine(path, { seed = 1, answers = [] } = {}) {
+export function loadEngine(path, opts) {
     const html = std.loadFile(path);
     if (html === null) throw new Error("can't read " + path);
+    return loadEngineFromHtml(html, opts);
+}
+
+export function loadEngineFromHtml(html, { seed = 1, answers = [] } = {}) {
     const story = extract(html);
     const io = {
         askLine(_eng, prompt, def) {

@@ -29,8 +29,9 @@ for (const file of files) {
             for (let s = 0; s < steps; s++) {
                 seen.add(engine.passageName);
                 const { text, links } = screenText(engine);
-                for (const m of text.matchAll(/\[Error: ([^\]]*)\]|<alert>\[([^\]]*)\]<\/>/g)) {
-                    const msg = (m[1] || m[2]).slice(0, 120);
+                // Errors are drawn bold ("alert"); their text can itself hold "]".
+                for (const m of text.matchAll(/<alert>\[(?:Error: )?(.*?)\]<\/>/g)) {
+                    const msg = m[1].slice(0, 120);
                     errors.set(msg, (errors.get(msg) || 0) + 1);
                 }
                 if (engine.lineRequest) {

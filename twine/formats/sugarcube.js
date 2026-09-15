@@ -10,6 +10,7 @@ import { parseLink, parseDuration } from "./common.js";
 import { GotoSignal } from "../engine.js";
 import { clone } from "../state.js";
 import { Writer } from "../writer.js";
+import { Revisions } from "./revision.js";
 
 // ── markup parser ────────────────────────────────────────────────────────────
 
@@ -20,7 +21,7 @@ const CONTAINERS = {
     script: [], widget: [], timed: ["next"], repeat: [], type: [], done: [], append: [],
     prepend: [], replace: [], cycle: ["option", "optionsfrom"], listbox: ["option", "optionsfrom"],
     click: [], createaudiogroup: ["track"], createplaylist: ["track"], do: [], choice: [],
-    message: [], remember: [], linkrevealgoto: [],
+    message: [], linkrevealgoto: [],
     // The popular third-party "replace/revise" macro set, done natively because
     // its own implementation is DOM manipulation.
     replacelink: ["becomes", "gains"], cyclinglink: ["becomes", "gains"],
@@ -61,6 +62,9 @@ function argsEnd(s, i) {
 }
 
 class Parser {
+    // customContainers: Map of author macros with a body — widgets and Macro.add
+    // tags (null), Twine 1 library macros ({ clauses, legacyEnd,
+    // bodylessWithArgs }, see revision.js).
     constructor(src, customContainers) {
         this.s = src;
         this.i = 0;
@@ -87,6 +91,11 @@ class Parser {
         let args = this.s.slice(i + m[0].length, e).trim();
         let close = !!m[1];
         if (LEGACY_CLOSE[name]) { close = true; name = LEGACY_CLOSE[name]; }
+        else if (!close && name.startsWith("end")) {
+            // <<endreplace>>: the closer of a Twine 1 library macro.
+            const c = this.custom.get(name.slice(3));
+            if (c && c.legacyEnd) { close = true; name = name.slice(3); }
+        }
         if (name === "else" && /^if\b/.test(args)) { name = "elseif"; args = args.slice(2).trim(); }
         return { close, name, args, end: e + 2 };
     }
@@ -245,8 +254,11 @@ class Parser {
 
     macroNode(tag) {
         const node = { t: "macro", name: tag.name, args: tag.args, sections: null };
+        const custom = this.custom.get(tag.name);
+        // Twine 1 <<continue "More">> has no body: the rest of the passage is its text.
+        if (custom && custom.bodylessWithArgs && tag.args) return node;
         if (!this.isContainer(tag.name)) return node;
-        const clauses = CONTAINERS[tag.name] || [];
+        const clauses = (custom && custom.clauses) || CONTAINERS[tag.name] || [];
         const sections = [{ name: tag.name, args: tag.args }];
         if (RAW_BODY.has(tag.name)) {
             const closer = "<</" + tag.name + ">>";
@@ -280,9 +292,14 @@ class Parser {
 const SUGAR = { to: "=", eq: "==", neq: "!=", is: "===", isnot: "!==", gt: ">", gte: ">=",
     lt: "<", lte: "<=", and: "&&", or: "||", not: "!",
     def: '"undefined" !== typeof', ndef: '"undefined" === typeof' };
+// Twine 1.4 reads its operator words in any case (`OR`, `And`).
+const LEGACY_OPS = new Set(["and", "or", "not", "is", "eq", "neq", "gt", "gte", "lt", "lte"]);
 
 // SugarCube's TwineScript → JavaScript, respecting strings and property names.
-export function desugar(src) {
+// opts.twine1: Twine 1.4's rules (its Wikifier.parse) — operator words in any
+// case, `is` a loose ==, and the names of the $variables used collected into
+// opts.vars. SugarCube (1 and 2) matches the words exactly and reads `is not` as !==.
+export function desugar(src, opts = {}) {
     let out = "";
     let i = 0;
     const s = src;
@@ -297,6 +314,7 @@ export function desugar(src) {
         }
         if (c === "$" && /[A-Za-z_]/.test(s[i + 1] || "") && !/[\w$.]/.test(s[i - 1] || "")) {
             const m = at(/\$([A-Za-z_$][\w$]*)/y, s, i);
+            if (opts.vars && !opts.vars.includes(m[1])) opts.vars.push(m[1]);
             out += "State.variables." + m[1];
             i += m[0].length;
             continue;
@@ -310,7 +328,15 @@ export function desugar(src) {
         if (/[A-Za-z]/.test(c) && !/[\w$.]/.test(s[i - 1] || "")) {
             const m = at(/[A-Za-z_$][\w$]*/y, s, i);
             const w = m[0];
-            out += Object.prototype.hasOwnProperty.call(SUGAR, w) ? SUGAR[w] : w;
+            const key = opts.twine1 && LEGACY_OPS.has(w.toLowerCase()) ? w.toLowerCase() : w;
+            const isNot = key === "is" && !opts.twine1 && at(/\s+not\b/y, s, i + w.length);
+            if (isNot) {                        // SugarCube: `is not` is !==
+                out += "!==";
+                i += w.length + isNot[0].length;
+                continue;
+            }
+            if (opts.twine1 && key === "is") out += "==";
+            else out += Object.prototype.hasOwnProperty.call(SUGAR, key) ? SUGAR[key] : w;
             i += w.length;
             continue;
         }
@@ -324,6 +350,13 @@ class LoopSignal {
     constructor(kind) { this.kind = kind; }
 }
 
+// A walk over the page's nodes ends where a real DOM ends it: at null. Without
+// this `while (node) node = node.nextSibling` never stops (Twine 1's sound
+// macros do that when they load). Parents stay inert: `el.parentNode.removeChild(el)`
+// is common in top-level author code.
+const DOM_WALK = new Set(["firstChild", "lastChild", "nextSibling", "previousSibling",
+    "firstElementChild", "lastElementChild", "nextElementSibling", "previousElementSibling"]);
+
 // Something that swallows any use: jQuery calls, document lookups, UI APIs.
 function inert(onWiki) {
     const fn = function () { return proxy; };
@@ -331,6 +364,7 @@ function inert(onWiki) {
         get(_t, prop) {
             if (prop === "wiki" && onWiki) return (text) => { onWiki(String(text)); return proxy; };
             if (prop === "length") return 0;
+            if (DOM_WALK.has(prop)) return null;
             if (prop === Symbol.toPrimitive) return () => "";
             if (prop === "then" || prop === Symbol.iterator) return undefined;
             if (prop === "toString" || prop === "valueOf") return () => "";
@@ -349,6 +383,7 @@ export class SugarCube {
     constructor(engine, opts) {
         this.engine = engine;
         this.legacy = !!(opts && opts.legacy);
+        this.twine1 = !!(opts && opts.twine1);   // Twine 1.4's Sugarcane/Jonah runtime
         this.temps = {};
         this.cache = new Map();
         this.fnCache = new Map();
@@ -357,6 +392,8 @@ export class SugarCube {
         this.depth = 0;
         this.outputs = [];              // writer stack for custom macros' output
         this.done = [];
+        this.revision = null;           // Twine 1 revision macros (revision.js)
+        this.timedGoto = null;
         this.buildEnv();
     }
 
@@ -483,6 +520,7 @@ export class SugarCube {
         this.env.V = State.variables;
         this.env.T = this.temps;
         this.env.Wikifier.wikifyEval = (text) => { self.wikiIntoCurrent(String(text)); return inert(); };
+        this.env.Wikifier.formatters = [];      // Twine 1 scripts add markup rules to it
         this.envNames = Object.keys(this.env);
     }
 
@@ -501,14 +539,24 @@ export class SugarCube {
         return fn;
     }
 
+    // TwineScript → JavaScript under this story's runtime rules. `pre` gives
+    // the $variables an expression uses the value 0 when they have none yet,
+    // as Twine 1.4 does (its parse prepends `$v == null && ($v = 0)`).
+    translate(code) {
+        const vars = this.twine1 ? [] : null;
+        const js = desugar(code, { legacy: this.legacy, twine1: this.twine1, vars });
+        const pre = vars ? vars.map((v) => `State.variables.${v} == null && (State.variables.${v} = 0);`).join("") : "";
+        return { js, pre };
+    }
+
     evaluate(expr, locals) {
-        const js = desugar(expr);
-        return this.compile("with (__locals || {}) { return (" + js + "\n); }")(...this.envValues(), locals);
+        const { js, pre } = this.translate(expr);
+        return this.compile("with (__locals || {}) { " + pre + "return (" + js + "\n); }")(...this.envValues(), locals);
     }
 
     run(code, locals) {
-        const js = desugar(code);
-        return this.compile("with (__locals || {}) {" + js + "\n}")(...this.envValues(), locals);
+        const { js, pre } = this.translate(code);
+        return this.compile("with (__locals || {}) {" + pre + js + "\n}")(...this.envValues(), locals);
     }
 
     runScript(code) {
@@ -525,11 +573,13 @@ export class SugarCube {
         return nodes;
     }
 
+    // Author macros with a body, for the parser (see Parser).
     containerWidgets() {
-        const set = new Set();
-        for (const [n, w] of this.widgets) if (w.container) set.add(n);
-        for (const [n, d] of this.custom) if (d && d.tags) set.add(n);
-        return set;
+        const map = new Map();
+        for (const [n, w] of this.widgets) if (w.container) map.set(n, null);
+        for (const [n, d] of this.custom) if (d && d.tags) map.set(n, null);
+        if (this.revision) for (const [n, c] of this.revision.containers) map.set(n, c);
+        return map;
     }
 
     // ── lifecycle ──────────────────────────────────────────────────────────
@@ -543,6 +593,10 @@ export class SugarCube {
                 engine.warn("author script error: " + (e && e.message));
             }
         }
+        // Only Twine 1 / SugarCube 1 register macros through `macros`: a SugarCube 2
+        // story can ship a copy of the library whose table would shadow built-ins
+        // (<<cycle>>, <<replace>>) although it never took effect there.
+        this.revision = this.legacy ? Revisions.detect(this, this.custom) : null;
         for (const p of engine.story.passages.values()) {
             if (p.tags.includes("widget")) this.silently(p.text);
         }
@@ -556,6 +610,7 @@ export class SugarCube {
         this.temps = {};
         this.done = [];
         this.depth = 0;
+        if (this.revision) this.revision.reset();
         const engine = this.engine;
         const special = (name) => engine.passage(name);
         if (special("PassageReady")) this.silently(special("PassageReady").text);
@@ -564,6 +619,7 @@ export class SugarCube {
         if (special("PassageFooter")) this.renderText(special("PassageFooter").text, w);
         if (special("PassageDone")) this.silently(special("PassageDone").text);
         for (const fn of this.done) fn(w);
+        if (this.revision) this.revision.afterRender();
     }
 
     renderPassage(p, w) {
@@ -605,7 +661,8 @@ export class SugarCube {
     renderNodes(nodes, w) {
         const toggles = {};
         let heading = null;
-        for (const n of nodes) {
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i];
             switch (n.t) {
                 case "text": w.markup(n.v); break;
                 case "verbatim": w.text(n.v); break;
@@ -645,7 +702,15 @@ export class SugarCube {
                     break;
                 }
                 case "naked": this.guard(w, n.expr, () => this.printValue(this.evaluate(n.expr), w, false)); break;
-                case "macro": this.guard(w, "<<" + n.name + ">>", () => this.macro(n, w)); break;
+                case "macro":
+                    if (this.revision && this.revision.takesRest(n)) {
+                        // Twine 1 <<continue>>: what follows here is its last version.
+                        this.guard(w, "<<" + n.name + ">>", () => this.macro(n, w, nodes.slice(i + 1)));
+                        i = nodes.length;
+                        break;
+                    }
+                    this.guard(w, "<<" + n.name + ">>", () => this.macro(n, w));
+                    break;
             }
         }
         if (heading) w.endStyle(heading);
@@ -663,8 +728,15 @@ export class SugarCube {
 
     renderLinkNode(n, w) {
         let target = n.target;
-        // [[Go|$destination]]: a target that is a variable is evaluated.
-        if (/^[$_][A-Za-z]/.test(target) && !this.engine.passage(target)) {
+        // [[My site|http://example.com]]: a web address is an external link in
+        // Twine 1 and SugarCube. Nothing can open it here, so the label is plain text.
+        if (/^[a-z][\w+.-]*:\/\//i.test(target) && !this.engine.passage(target)) {
+            this.renderText(n.label, w);
+            return;
+        }
+        // [[Go|$destination]], Twine 1's [[Back|previous()]]: a target that names
+        // no passage but reads as a variable or a call is evaluated.
+        if (/^[$_][A-Za-z]|\)\s*$/.test(target) && !this.engine.passage(target)) {
             try { target = String(this.evaluate(target)); } catch (_) { /* keep literal */ }
         }
         this.engine.addLink(w, (lw) => this.renderText(n.label, lw), () => {
@@ -742,7 +814,11 @@ export class SugarCube {
         this.renderSection(section, w);
     }
 
-    macro(n, w) {
+    // rest: the nodes after this one (Twine 1 <<continue>> takes them).
+    macro(n, w, rest) {
+        if (this.revision && this.revision.handles(n.name)) return this.revision.macro(n, w, rest);
+        // Twine 1's sound macro library: its handlers expect a browser. No sound here.
+        if (this.legacy && LEGACY_SOUND.has(n.name)) return;
         const impl = MACROS[n.name];
         if (impl) return impl.call(this, n, w);
         if (this.widgets.has(n.name)) return this.callWidget(n, w);
@@ -809,6 +885,10 @@ const SILENT = new Set(["audio", "cacheaudio", "createaudiogroup", "createplayli
     "playlist", "removeaudiogroup", "removeplaylist", "waitforaudio", "track", "addclass",
     "removeclass", "toggleclass", "copy", "redo", "stopallaudio", "unsetaudio", "css", "addstyle",
     "savesettings", "loadsettings", "bookmark", "saves", "restart", "theme"]);
+// Leon Arnott's Twine 1 sound macros (registered by author script, so they must
+// be skipped before custom macros run).
+const LEGACY_SOUND = new Set(["playsound", "loopsound", "pausesound", "unloopsound", "stopsound",
+    "fadeinsound", "fadeoutsound", "stopallsound"]);
 
 function linkLabelAndTarget(self, args) {
     const first = args[0];
@@ -875,6 +955,17 @@ const MACROS = {
     goto(n) {
         const args = this.parseArgs(n.args);
         this.engine.goto(this.passageArg(args[0]));
+    },
+    // Twine 1's timedgoto snippet: <<timedgoto "passage" 2s>> jumps when the
+    // time is up; a later one on the page replaces it.
+    timedgoto(n) {
+        const m = /\s+(\S+)\s*$/.exec(n.args);
+        const ms = m ? parseDuration(m[1]) : null;
+        if (ms === null) throw new Error("no time given");
+        const target = String(this.evaluate(n.args.slice(0, m.index)) ?? "");
+        if (!target) return;
+        if (this.timedGoto) this.engine.stopTimer(this.timedGoto);
+        this.timedGoto = this.engine.after(ms, () => this.engine.goto(target));
     },
     back(n, w) {
         const args = this.parseArgs(n.args);

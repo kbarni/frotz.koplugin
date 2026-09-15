@@ -990,7 +990,11 @@ function GameView:_pollStep()
 
     if (time.now() - self._poll_start) >= time.s(POLL_TIMEOUT_S) then
         self._polling = false
-        if not self.engine:is_alive() then self:_onGameEnded() end
+        if not self.engine:is_alive() then
+            self:_onGameEnded()
+        else
+            self:_onNotResponding()
+        end
         return
     end
     UIManager:scheduleIn(POLL_INTERVAL_S, function() self:_pollStep() end)
@@ -1680,6 +1684,20 @@ function GameView:_onGameEnded()
         text        = _("The game has ended. Close the game view?"),
         ok_text     = _("Close"),
         ok_callback = function() self:onClose() end,
+    })
+end
+
+-- The interpreter still runs but hasn't answered for POLL_TIMEOUT_S: a story
+-- stuck in a script loop, or a very slow turn. Ask, rather than leave a silent
+-- page with the process spinning on the battery. Closing doesn't try to
+-- autosave: no input request is pending, so _atSavePoint() is false.
+function GameView:_onNotResponding()
+    UIManager:show(ConfirmBox:new{
+        text            = _("The game is not responding. Close it, or keep waiting?"),
+        ok_text         = _("Close"),
+        cancel_text     = _("Wait"),
+        ok_callback     = function() self:onClose() end,
+        cancel_callback = function() self:_startPolling() end,
     })
 end
 

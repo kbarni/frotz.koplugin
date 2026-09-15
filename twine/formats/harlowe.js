@@ -38,8 +38,9 @@ function findClose(s, i) {
     while (i < s.length) {
         const c = s[i];
         if (c === '"' || c === "'") {
-            // A possessive 's is not a string opener.
-            if (c === "'" && s[i + 1] === "s" && /\w/.test(s[i - 1] || "") && !/\w/.test(s[i + 2] || "")) {
+            // A possessive 's is not a string opener — also after a call or a
+            // hook: (passage:)'s tags.
+            if (c === "'" && s[i + 1] === "s" && /[\w)\]]/.test(s[i - 1] || "") && !/\w/.test(s[i + 2] || "")) {
                 i += 2;
                 continue;
             }
@@ -79,10 +80,21 @@ class MarkupParser {
         return { node: { name: m[1], src: this.s.slice(j + m[0].length, close) }, end: close + 1 };
     }
 
-    // A hook opening at j ("[" not "[["), with optional tags.
+    // End of a [[link]] opening at j, or -1. As in Harlowe, link text holds no
+    // "]": `[[Verse one]<v1|` is a named hook inside a hook, not a link running
+    // on to some later "]]" (which left every enclosing hook unclosed, and
+    // re-parsing those was exponential in their depth).
+    linkEndAt(j) {
+        const s = this.s;
+        if (s[j] !== "[" || s[j + 1] !== "[" || s[j + 2] === "[") return -1;
+        const e = s.indexOf("]", j + 2);
+        return e >= 0 && s[e + 1] === "]" ? e : -1;
+    }
+
+    // A hook opening at j (a "[" that doesn't start a link), with optional tags.
     hookAt(j, name, hidden) {
         const s = this.s;
-        if (s[j] !== "[" || s[j + 1] === "[") return null;
+        if (s[j] !== "[" || this.linkEndAt(j) >= 0) return null;
         const save = this.i;
         this.i = j + 1;
         const r = this.seq("]");
@@ -202,7 +214,7 @@ class MarkupParser {
                 }
             }
             if (c === "[" && s[i + 1] === "[") {
-                const e = s.indexOf("]]", i + 2);
+                const e = this.linkEndAt(i);
                 if (e >= 0) {
                     push({ t: "link", body: s.slice(i + 2, e) });
                     this.i = e + 2;
@@ -327,8 +339,12 @@ function tokenize(src) {
     const s = src;
     const valueEnd = () => {
         const p = toks[toks.length - 1];
+        const before = toks[toks.length - 2];
+        // A property name or position read by a 's can be read in turn:
+        // (passage:)'s tags's length, $a's 1st's name.
         return p && (p.k === "var" || p.k === "temp" || p.k === ")" || p.k === "str"
-                     || (p.k === "id" && /^(it|its)$/i.test(p.v)) || p.k === "hook");
+                     || p.k === "hook" || p.k === "pos"
+                     || (p.k === "id" && (/^(it|its)$/i.test(p.v) || (before && before.k === "'s"))));
     };
     while (i < s.length) {
         const c = s[i];
@@ -869,6 +885,7 @@ export class Harlowe {
     render(passage, w) {
         this.temps = {};
         this.bindings = [];
+        this.mores = [];
         this.depth = 0;
         if (this.engine.history.length === 1) {
             for (const p of this.startup) this.renderSource(p.text, w);
@@ -1127,7 +1144,7 @@ export class Harlowe {
     applyChanger(value, hook, w, scope) {
         const opts = { styles: [], collapse: false, verbatim: false };
         let show = true, cond = null, hidden = !!hook.hidden;
-        let link = null, target = null, timing = null, loop = null, click = null;
+        let link = null, target = null, timing = null, loop = null, click = null, more = false;
         for (const c of value ? value.changer : []) {
             switch (c.type) {
                 case "cond": {
@@ -1139,6 +1156,7 @@ export class Harlowe {
                     break;
                 }
                 case "hidden": hidden = true; break;
+                case "more": more = true; break;
                 case "style": opts.styles.push(...c.styles); break;
                 case "collapse": opts.collapse = true; break;
                 case "verbatim": opts.verbatim = true; break;
@@ -1172,6 +1190,12 @@ export class Harlowe {
             return;
         }
         if (link) return this.renderLinkChanger(link, hook, w, renderBody, names);
+        if (more) {
+            const rid = w.openRegion(names);
+            w.closeRegion(rid);
+            this.mores.push({ rid, render: renderBody });
+            return;
+        }
         if (timing) {
             const rid = w.openRegion(names);
             w.closeRegion(rid);
@@ -1252,8 +1276,25 @@ export class Harlowe {
         }
     }
 
-    // (click: ?hook)[…]: once the page exists, make the target's text a link.
+    // After the page is drawn or changed: bind pending (click:) targets, then
+    // show (more:) hooks when no link is left.
     flushBindings() {
+        this.bindClicks();
+        this.revealMores();
+    }
+
+    // (more:)[…]: hidden until the page has no links left (Harlowe shows it
+    // when its `exits` count reaches 0).
+    revealMores() {
+        if (!this.mores || !this.mores.length || this.engine.runs.some((r) => r.link)) return;
+        const pending = this.mores;
+        this.mores = [];
+        for (const m of pending) this.engine.fillRegion(m.rid, m.render, "replace");
+        this.flushBindings();
+    }
+
+    // (click: ?hook)[…]: once the page exists, make the target's text a link.
+    bindClicks() {
         const engine = this.engine;
         const pending = this.bindings;
         this.bindings = [];
@@ -1349,6 +1390,7 @@ const MACROS = {
     elseif(node, ctx) { return changer({ type: "cond", kind: "elseif", value: this.bool(a1(this, node, ctx)[0]) }); },
     else() { return changer({ type: "cond", kind: "else" }); },
     hidden() { return changer({ type: "hidden" }); },
+    more() { return changer({ type: "more" }); },
     cond(node, ctx) {
         const v = a1(this, node, ctx);
         for (let i = 0; i + 1 < v.length; i += 2) if (this.bool(v[i])) return v[i + 1];
