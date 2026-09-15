@@ -30,14 +30,6 @@ To install, copy the contents of the release to the `koreader/plugins` folder.
 
 To run, click on *Interactive fiction* in the *Tools* menu.
 
-### Finding games
-
-*Find games on IFDB…* opens a browser for the [Interactive Fiction Database](https://ifdb.org) (needs Wi-Fi):
-
-- Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me* — limited to Z-machine and/or Glulx games (tap *Formats* to choose)
-- *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
-- Tap a game for its description, rating, play time and tags, its cover, and **Download**. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
-
 Each architecture ships two interpreter binaries, `bocfel` (Z-machine) and `git` (Glulx), under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
 | Folder | Architecture | Devices |
@@ -56,6 +48,17 @@ cd Koreader/plugins/frotz.koplugin/binaries/<arch>
 chmod +x bocfel
 chmod +x git
 ```
+
+### Finding games
+
+The [Interactive Fiction Database](https://ifdb.org) has the largest collection of IF games. *Frotz* includes a game browser and downloader for IFDB. 
+
+Click *Find games on IFDB…* in the *Interactive fiction menu to browse games (needs internet connection):
+
+- Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me* — limited to Z-machine and/or Glulx games (tap *Formats* to choose)
+- *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
+- Tap a game for its description, rating, play time and tags, its cover, and **Download**. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
+
 
 ## About interactive fiction games
 
