@@ -89,7 +89,7 @@ To get IF games, use the plugin's *Find games on IFDB…* entry, or check one of
 
 Twine stories are published as HTML pages and are normally played in a web browser. As KOReader has no built-in browser, *Frotz* uses its own player running on the *QuickJS* JavaScript engine. *Twine support* is still experimental: around three quarters of the most-rated Twine games on IFDB play well. Stories with their own JavaScript code, complex styling or animations may show errors or get stuck.
 
-Please check the [Twine compatibility guide]() to see whether a game is supported.
+Please check the [Twine compatibility guide](twinegames.md) to see whether a game is supported.
 
 To get Twine games, choose *Twine* in *Find games on IFDB…*, or look for `.html` files and zips in the [IF Archive](https://ifarchive.org/indexes/if-archive/games/twine/). Games that only exist as a web page (on itch.io, for example) cannot be downloaded.
 
