@@ -63,14 +63,6 @@ chmod +x qjs
 - *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
 - Tap a game to see its description, rating, play time, tags and cover, and to **Download** it. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
 
-### Twine stories
-
-Open a Twine game's `.html` file like any other game (*Open game…* lists only HTML files that contain a Twine story, so walkthroughs and other web pages stay hidden). Links are underlined; tap one (or type its number or its text in the command field). Text boxes open the keyboard, timed text appears when it is due, and *Save*, *Restore*, *Undo* and autosave work as for other games.
-
-Pictures work like blorb illustrations: a tappable `[Illustration 2: …]` line opens the picture full screen, small icons and repeated decorations are left out, and the menu's **Illustrations** entry lists them all. Pictures must be files next to the story (a zip from IFDB brings them along) or embedded in it; pictures on the web show only their description.
-
-Twine stories are web pages, and KOReader has no web browser, so the plugin plays them with its own reimplementation of the story formats. Most choice-based stories work. What does not: page styling and layout (CSS), pictures laid out inside the text, sound, animations, and games that rely on their own JavaScript to change the page.
-
 ## About interactive fiction games
 
 Interactive fiction was a major game genre at the beginning of the 1980s. It was well suited to the first PCs, which lacked graphics and processing power. It started with *Colossal Cave Adventure* in the late '70s and became mainstream with the *Zork* trilogy, which had a more advanced interpreter with more commands, better puzzles and larger worlds.
@@ -87,11 +79,13 @@ To get IF games, use the plugin's *Find games on IFDB…* entry, or check one of
 
 [Twine](https://twinery.org) made interactive fiction much easier to write: instead of a parser and typed commands, a story is a web of passages joined by links, and the reader simply chooses. It opened the genre to many new authors, and some of the most talked-about IF of the last fifteen years was made with it — Porpentine's *howling dogs* and *With Those We Love Alive*, Brendan Patrick Hennessy's *Birdland*, *Depression Quest*. Being easier to write, these games became an excellent medium for personal and emotional journeys and for themes that were rarely explored before: personal experience and mental health, identity, gender and social issues, literary and philosophical exploration. They are also simpler to play: you follow links instead of typing commands and guessing the right wording.
 
-Twine stories are published as HTML pages and are normally played in a web browser. As KOReader has no built-in browser, *Frotz* uses its own player running on the *QuickJS* JavaScript engine. *Twine support* is still experimental: around three quarters of the most-rated Twine games on IFDB play well. Stories with their own JavaScript code, complex styling or animations may show errors or get stuck.
+Twine stories are published as HTML pages and are normally played in a web browser. As KOReader has no built-in browser, *Frotz* uses its own interpreter running on the *QuickJS* JavaScript engine. The story works, but using pure text mode, Twine games will be very stripped down: no styling or decorative elements, no music or sound - which can be important elements for the full experience. If possible, play these games in browser, as originally intended.
+
+*Twine support* is still experimental: around three quarters of the most-rated Twine games on IFDB play well. Stories with their own JavaScript code, complex styling or animations may show errors or get stuck.
 
 Please check the [Twine compatibility guide](twinegames.md) to see whether a game is supported.
 
-To get Twine games, choose *Twine* in *Find games on IFDB…*, or look for `.html` files and zips in the [IF Archive](https://ifarchive.org/indexes/if-archive/games/twine/). Games that only exist as a web page (on itch.io, for example) cannot be downloaded.
+To get Twine games, choose *Twine* in *Find games on IFDB…*, or look for `.html` files and zips in the [IF Archive](https://ifarchive.org/indexes/if-archive/games/twine/). Games that only exist as a web page (on itch.io, for example) cannot be downloaded. *However you can download them manually using a browser: open the game, then select `Save page as...` from the menu; then copy them to the Kindle.*
 
 ## Why play interactive fiction today?
 
