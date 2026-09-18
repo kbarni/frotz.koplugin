@@ -70,6 +70,25 @@ local Frotz = WidgetContainer:extend{
 
 function Frotz:init()
     self.ui.menu:registerToMainMenu(self)
+    self:_registerSimpleUIModule()
+end
+
+-- ── Simple UI integration ───────────────────────────────────────────────────────
+-- If the Simple UI plugin (simpleui.koplugin) is installed, register a launcher
+-- module on its homescreen. The module is a single tappable row that opens our
+-- Recent games picker — quick access to resume playing. No-op when Simple UI is
+-- absent, and safe to re-run: Registry.register() dedups by module id, so each
+-- FileManager/Reader init just refreshes the descriptor with the current Frotz
+-- instance (its captured `self` drives the tap).
+function Frotz:_registerSimpleUIModule()
+    -- Simple UI's registry lives at "modules/moduleregistry"; KOReader's
+    -- PluginLoader puts every plugin root on package.path, so this require
+    -- resolves to Simple UI's file when it is installed and enabled.
+    local ok_reg, Registry = pcall(require, "modules/moduleregistry")
+    if not (ok_reg and type(Registry) == "table" and Registry.register) then return end
+    local ok_mod, mod = pcall(require, "simpleui_module")
+    if not (ok_mod and type(mod) == "table" and mod.make) then return end
+    pcall(function() Registry.register(mod.make(self)) end)
 end
 
 -- ── Persistent settings (last directory + recent games + font size) ─────────────
@@ -187,6 +206,59 @@ function Frotz:_buildRecentSubmenu()
         })
     end
     return items
+end
+
+-- Standalone "Recent games" picker, used by the Simple UI launcher module (and
+-- usable from anywhere). Shows the recent games in a full-screen Menu; tapping
+-- one closes the picker and starts it. This mirrors _buildRecentSubmenu(), but
+-- as a self-contained window that closes itself on selection (the main menu
+-- closes automatically; a standalone Menu must be told to).
+function Frotz:_openRecentPicker()
+    self:_loadSettings()
+    local list    = self:_recentGames()
+    local library = GameLibrary.open()
+    local kept    = {}
+    local items   = {}
+    local menu    -- forward reference so callbacks can close it
+    for _idx, path in ipairs(list) do
+        if lfs.attributes(path, "mode") == "file" then
+            table.insert(kept, path)
+            local _dir, fname = util.splitFilePathName(path)
+            local entry = library:get(path)
+            table.insert(items, {
+                text      = (entry and entry.title) or fname,
+                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
+                            and _("saved") or nil,
+                -- Menu:onMenuSelect runs this callback, then close_callback,
+                -- so the picker closes itself; we only start the game here.
+                callback  = function()
+                    self:_startGame(path)
+                end,
+            })
+        end
+    end
+    if #kept ~= #list then
+        self:_saveSetting("recent_games", kept)
+    end
+
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No recent games yet.\nOpen a game from the Tools menu ▸ Interactive Fiction."),
+        })
+        return
+    end
+
+    local Menu = require("ui/widget/menu")
+    menu = Menu:new{
+        title               = _("Recent games"),
+        item_table          = items,
+        is_popout           = false,
+        is_borderless       = true,
+        covers_fullscreen   = true,
+        title_bar_fm_style  = true,
+    }
+    menu.close_callback = function() UIManager:close(menu) end
+    UIManager:show(menu)
 end
 
 -- ── Display settings ────────────────────────────────────────────────────────────
