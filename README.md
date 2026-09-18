@@ -4,10 +4,11 @@ This plugin lets you play interactive fiction games in KOReader.
 
 ![Screenshot](screenshot_frotz.png)
 
-It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Three interpreters are driven by the same engine, selected by file extension:
+It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the plugin renders a native KOReader UI (real status bar, styled text, single-key and line input). Four interpreters are driven by the same engine, selected by file extension:
 
 - **Bocfel** — [Z-machine](https://www.ifwiki.org/Z-machine) games: `.z1`–`.z8`, `.zblorb`, `.zlb`, `.dat` (the most common interactive fiction format)
 - **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.glb`, `.blb`, `.blorb`
+- **GlkTADS** — [TADS](https://www.tads.org) 2 and 3 games: `.gam`, `.t3` (one binary plays both)
 - **Twine** — [Twine](https://twinery.org) stories, published as a single `.html`/`.htm` file, run by the plugin's own Twine player on the [QuickJS](https://bellard.org/quickjs/) JavaScript engine.
 
 The plugin is text-focused. Illustrations *are* available: the story shows a link (e.g. `[Illustration 3]`), and tapping it (or the menu's **Illustrations** entry) opens the picture in KOReader's image viewer. Decorative and repeated images (borders in Glulx games, graphical page elements in Twine games) are left out. For full graphics support, use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
@@ -15,7 +16,7 @@ The plugin is text-focused. Illustrations *are* available: the story shows a lin
 ## Features
 
 - Should work on most platforms where KOReader is available
-- Z-machine, Glulx (Inform 7) and Twine games
+- Z-machine, Glulx (Inform 7), TADS 2/3 and Twine games
 - Native KOReader rendering: status bar, styled text, single-key and line input
 - Simple save and restore (per game and with slots), including autosave on closing
 - Recent games list, so you can pick up a game you played before without browsing for it again
@@ -33,7 +34,7 @@ To run, tap *Interactive fiction* in the *Tools* menu.
 
 ### Interpreter binaries
 
-Each architecture ships the interpreter binaries `bocfel` (Z-machine), `git` (Glulx) and `qjs` (QuickJS, for Twine) under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
+Each architecture ships the interpreter binaries `bocfel` (Z-machine), `git` (Glulx), `tadsr` (TADS 2/3) and `qjs` (QuickJS, for Twine) under `binaries/<arch>/`. The plugin picks the right one for your device automatically; you only need the folder matching your device:
 
 | Folder | Architecture | Devices |
 |--------|--------------|---------|
@@ -50,6 +51,7 @@ On some devices you need to make the binaries **executable**. Open a terminal an
 cd koreader/plugins/frotz.koplugin/binaries/<arch>
 chmod +x bocfel
 chmod +x git
+chmod +x tadsr
 chmod +x qjs
 ```
 
@@ -58,10 +60,17 @@ chmod +x qjs
 *Find games on IFDB…* opens a browser for the [Interactive Fiction Database](https://ifdb.org) (needs an internet connection):
 
 - Lists: *Top rated*, *Most rated*, *Newest releases*, *Short games*, *Surprise me*
-- Filtering by supported game format: all, Z-machine + Glulx, Z-machine, Glulx or Twine (tap *Formats* to choose)
+- Filtering by supported game format: all, Z-machine + Glulx, Z-machine, Glulx, TADS or Twine (tap *Formats* to choose)
 - Twine games can be downloaded only when the files are available: an `.html` file or a zip (usually on the IF Archive); games published only online (itch.io, philome.la) cannot
 - *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
 - Tap a game to see its description, rating, play time, tags and cover, and to **Download** it. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
+
+### Simple UI
+
+If the Simple UI plugin (`simpleui.koplugin`) is installed, the plugin plugs into it in two places:
+
+- a **quick action** called *Interactive Fiction*, which can be put on the bottom bar or in a Quick Actions row like any built-in action; it opens the *Recent games* list, or the game browser when you haven't played anything yet
+- a **homescreen list** of the games you played last, switched on in Simple UI's *Arrange* list: tap a game to resume it (*saved* marks one with an autosave), and choose how many are listed in the module's *Games shown* setting
 
 ## About interactive fiction games
 
@@ -107,6 +116,7 @@ The interpreters are bundled as separate binaries, each under its own license:
 
 - **[Bocfel](https://github.com/garglk/garglk/tree/master/terps/bocfel)** — Z-machine VM by Chris Spiegel
 - **[Git](https://github.com/DavidKinder/Git)** — Glulx VM by Iain Merrick
+- **[GlkTADS](https://github.com/tads-intfic/tads-runner)** — TADS 2/3 VM by Michael J. Roberts, Glk port extracted from Gargoyle (GPL-2.0)
 - **[RemGlk](https://github.com/erkyrath/remglk)** — the JSON Glk I/O layer by Andrew Plotkin
 - **[QuickJS](https://bellard.org/quickjs/)** — JavaScript engine by Fabrice Bellard and Charlie Gordon (MIT), which runs the Twine player
 

@@ -25,6 +25,9 @@ local _plugin_dir = debug.getinfo(1, "S").source:match("@(.+)/[^/]+$") or "."
 
 local DEFAULT_FONT_SIZE = 20
 local MAX_RECENT        = 10
+-- Recent games listed on the Simple UI homescreen (1…MAX_RECENT, see
+-- Frotz:_simpleuiRowCount).
+local DEFAULT_SIMPLEUI_ROWS = 3
 
 -- ── Interpreter binary lookup ────────────────────────────────────────────────────
 -- Prefer a per-arch binary under binaries/<arch>/, fall back to bin/ (the host
@@ -70,25 +73,28 @@ local Frotz = WidgetContainer:extend{
 
 function Frotz:init()
     self.ui.menu:registerToMainMenu(self)
-    self:_registerSimpleUIModule()
+    self:_registerSimpleUI()
+end
+
+-- Launch the plugin from outside its own menu: opens the Recent games picker,
+-- or the game browser when nothing has been played yet. Simple UI's generic
+-- "add a plugin as a quick action" scan looks for a method named
+-- onShow/show/open/launch/onOpen (our main-menu entry is a submenu, so it has
+-- no callback for that scan to reuse) — `launch` is that hook, and it is a
+-- reasonable entry point for any other caller too.
+function Frotz:launch()
+    self:_openRecentPicker(true)
 end
 
 -- ── Simple UI integration ───────────────────────────────────────────────────────
--- If the Simple UI plugin (simpleui.koplugin) is installed, register a launcher
--- module on its homescreen. The module is a single tappable row that opens our
--- Recent games picker — quick access to resume playing. No-op when Simple UI is
--- absent, and safe to re-run: Registry.register() dedups by module id, so each
--- FileManager/Reader init just refreshes the descriptor with the current Frotz
--- instance (its captured `self` drives the tap).
-function Frotz:_registerSimpleUIModule()
-    -- Simple UI's registry lives at "modules/moduleregistry"; KOReader's
-    -- PluginLoader puts every plugin root on package.path, so this require
-    -- resolves to Simple UI's file when it is installed and enabled.
-    local ok_reg, Registry = pcall(require, "modules/moduleregistry")
-    if not (ok_reg and type(Registry) == "table" and Registry.register) then return end
-    local ok_mod, mod = pcall(require, "simpleui_module")
-    if not (ok_mod and type(mod) == "table" and mod.make) then return end
-    pcall(function() Registry.register(mod.make(self)) end)
+-- If the Simple UI plugin (simpleui.koplugin) is installed, add ourselves to its
+-- launch screen: a list of the last played games, and an "Interactive Fiction"
+-- quick action. Both live in simpleui_integration.lua, which no-ops when Simple
+-- UI is absent; see its header.
+function Frotz:_registerSimpleUI()
+    local ok, SimpleUI = pcall(require, "simpleui_integration")
+    if not (ok and type(SimpleUI) == "table" and SimpleUI.register) then return end
+    SimpleUI.register(self)
 end
 
 -- ── Persistent settings (last directory + recent games + font size) ─────────────
@@ -166,11 +172,15 @@ function Frotz:_pushRecent(gamefile)
     self:_saveSetting("recent_games", list)
 end
 
-function Frotz:_buildRecentSubmenu()
-    local list  = self:_recentGames()
-    local kept  = {}
-    local items = {}
+-- The recent games that are still on the device, newest first, as
+--   { path = …, title = …, saved = true|false }
+-- Games whose file has gone are dropped from the stored list as we go, so
+-- every reader of the list agrees on it. Shared by the Tools submenu, the
+-- standalone picker and the Simple UI homescreen list.
+function Frotz:_recentEntries()
+    local list    = self:_recentGames()
     local library = GameLibrary.open()
+    local kept, entries = {}, {}
     for _idx, path in ipairs(list) do
         if lfs.attributes(path, "mode") == "file" then
             table.insert(kept, path)
@@ -178,16 +188,27 @@ function Frotz:_buildRecentSubmenu()
             -- A known title (from IFDB, or one a Twine story reported) reads
             -- better than a file name like "index.html".
             local entry = library:get(path)
-            table.insert(items, {
-                text      = (entry and entry.title) or fname,
-                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
-                            and _("saved") or nil,
-                callback  = function() self:_startGame(path) end,
+            table.insert(entries, {
+                path  = path,
+                title = (entry and entry.title) or fname,
+                saved = lfs.attributes(self:_autosavePathFor(path), "mode") ~= nil,
             })
         end
     end
     if #kept ~= #list then
         self:_saveSetting("recent_games", kept)
+    end
+    return entries
+end
+
+function Frotz:_buildRecentSubmenu()
+    local items = {}
+    for _idx, e in ipairs(self:_recentEntries()) do
+        table.insert(items, {
+            text      = e.title,
+            mandatory = e.saved and _("saved") or nil,
+            callback  = function() self:_startGame(e.path) end,
+        })
     end
     if #items > 0 then
         table.insert(items, {
@@ -213,35 +234,29 @@ end
 -- one closes the picker and starts it. This mirrors _buildRecentSubmenu(), but
 -- as a self-contained window that closes itself on selection (the main menu
 -- closes automatically; a standalone Menu must be told to).
-function Frotz:_openRecentPicker()
+-- browse_if_empty: no playable recent game left (first run, or every file gone)
+-- opens the game browser instead of a dead end. Set by callers that reach us
+-- from outside the Tools menu — a Simple UI quick action, say, where the menu
+-- the message points at isn't even on screen.
+function Frotz:_openRecentPicker(browse_if_empty)
     self:_loadSettings()
-    local list    = self:_recentGames()
-    local library = GameLibrary.open()
-    local kept    = {}
-    local items   = {}
-    local menu    -- forward reference so callbacks can close it
-    for _idx, path in ipairs(list) do
-        if lfs.attributes(path, "mode") == "file" then
-            table.insert(kept, path)
-            local _dir, fname = util.splitFilePathName(path)
-            local entry = library:get(path)
-            table.insert(items, {
-                text      = (entry and entry.title) or fname,
-                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
-                            and _("saved") or nil,
-                -- Menu:onMenuSelect runs this callback, then close_callback,
-                -- so the picker closes itself; we only start the game here.
-                callback  = function()
-                    self:_startGame(path)
-                end,
-            })
-        end
-    end
-    if #kept ~= #list then
-        self:_saveSetting("recent_games", kept)
+    local items = {}
+    local menu  -- forward reference so callbacks can close it
+    for _idx, e in ipairs(self:_recentEntries()) do
+        table.insert(items, {
+            text      = e.title,
+            mandatory = e.saved and _("saved") or nil,
+            -- Menu:onMenuSelect runs this callback, then close_callback, so
+            -- the picker closes itself; we only start the game here.
+            callback  = function() self:_startGame(e.path) end,
+        })
     end
 
     if #items == 0 then
+        if browse_if_empty then
+            self:_openFileBrowser()
+            return
+        end
         UIManager:show(InfoMessage:new{
             text = _("No recent games yet.\nOpen a game from the Tools menu ▸ Interactive Fiction."),
         })
@@ -262,6 +277,18 @@ function Frotz:_openRecentPicker()
 end
 
 -- ── Display settings ────────────────────────────────────────────────────────────
+
+-- How many recent games the Simple UI homescreen list shows. Kept in our own
+-- settings rather than Simple UI's per-screen store, so the module stays free
+-- of Simple UI internals (see simpleui_integration.lua).
+function Frotz:_simpleuiRowCount()
+    self:_loadSettings()
+    return self._settings:readSetting("simpleui_rows") or DEFAULT_SIMPLEUI_ROWS
+end
+
+function Frotz:_setSimpleuiRowCount(n)
+    self:_saveSetting("simpleui_rows", n)
+end
 
 function Frotz:_fontSize()
     self:_loadSettings()
@@ -294,7 +321,7 @@ function Frotz:_openFileBrowser()
     UIManager:show(PathChooser:new{
         select_directory = false,
         path             = start_dir,
-        -- Show Z-machine, Glulx and Twine games (resolved by extension).
+        -- Show Z-machine, Glulx, TADS and Twine games (resolved by extension).
         -- KOReader's FileChooser reads this as `file_filter` (not `filter_func`),
         -- and only honours it when `show_unsupported` is false.
         show_unsupported = false,
@@ -342,9 +369,18 @@ function Frotz:_saveDirFor(gamefile)
     return DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
 end
 
--- Glk VMs write their own save format; the Twine player writes JSON.
+-- Glk VMs write their own save format; the Twine player writes JSON. The
+-- extension is mostly cosmetic — what matters is that a fileref answer has
+-- *some* extension, or RemGlk appends ".glksave" to it (rgfref.c) and the slot
+-- file lands somewhere we do not look — but an honest one helps when the save
+-- folder is opened on a computer.
 local function save_ext_for(gamefile)
-    return Resolver.vm_for(gamefile) == "twine" and ".json" or ".qzl"
+    local vm = Resolver.vm_for(gamefile)
+    if vm == "twine" then return ".json" end
+    if vm == "tadsr" then
+        return Resolver.ext_of(gamefile) == "gam" and ".sav" or ".t3v"
+    end
+    return ".qzl"
 end
 
 function Frotz:_autosavePathFor(gamefile)
@@ -398,6 +434,19 @@ function Frotz:_startGame(gamefile)
     -- rows is advertised tall so the VM never paginates; the UI owns paging.
     local rows = 200
 
+    -- TADS 2 (.gam) dies with "stack smashing detected" before its first update
+    -- if the handshake advertises 256 columns or more — its osifc layer carries
+    -- fixed 256-byte line buffers. 255 is fine, 256 is fatal; TADS 3 is immune
+    -- (tested to 1000). Only a very wide screen at a small font gets near it
+    -- (a Scribe at 1860px with a ~7px advance is ~265), but the failure mode is
+    -- a dead VM with nothing on screen, so clamp it.
+    -- Clamp ONLY what we send the VM: GameView keeps the true `cols`, so the
+    -- transcript still wraps to the full screen width.
+    local engine_cols = cols
+    if Resolver.ext_of(gamefile) == "gam" then
+        engine_cols = math.min(cols, 200)
+    end
+
     self:_pushRecent(gamefile)
 
     -- Per-game save directory holds the numbered slots and the autosave.
@@ -439,7 +488,7 @@ function Frotz:_startGame(gamefile)
             logger.err("Frotz: session error:", transport)
             return
         end
-        local engine = RemGlk:new(transport, rapidjson, cols, rows)
+        local engine = RemGlk:new(transport, rapidjson, engine_cols, rows)
 
         local game_view = GameView:new{
             engine       = engine,
