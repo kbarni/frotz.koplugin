@@ -25,12 +25,18 @@ The plugin is text-focused. Illustrations *are* available: the story shows a lin
 - Word lookup in dictionaries or Wikipedia, just like in KOReader
 - Option to hide the on-screen keyboard when using an external keyboard
 - Font size setting
+- A [beginner's tutorial](TUTORIAL.md) for players new to interactive fiction
 
 ## Installation and running
 
 To install, copy the contents of the release to the `koreader/plugins` folder.
 
 To run, tap *Interactive fiction* in the *Tools* menu.
+
+If the Simple UI or ZenUI plugins are installed, Frotz can be added to the main screen:
+
+- as a **quick action** called *Interactive Fiction*, which can be put on the bottom bar or in a Quick Actions row like any built-in action; it opens the *Recent games* list, or the game browser when you haven't played anything yet
+- a **homescreen widget** of the games you played last, switched on in Simple UI's *Arrange* list: tap a game to resume it (*saved* marks one with an autosave), and choose how many are listed in the module's *Games shown* setting
 
 ### Interpreter binaries
 
@@ -65,12 +71,6 @@ chmod +x qjs
 - *Search…* by title or author, or with IFDB filters such as `tag:horror`, `author:"Emily Short"`, `rating:4-`, `playtime:-1h`
 - Tap a game to see its description, rating, play time, tags and cover, and to **Download** it. Zip files are unpacked automatically; the game is saved to the download folder (default `koreader/ifgames/<game title>/`) and can be started right away
 
-### Simple UI
-
-If the Simple UI plugin (`simpleui.koplugin`) is installed, the plugin plugs into it in two places:
-
-- a **quick action** called *Interactive Fiction*, which can be put on the bottom bar or in a Quick Actions row like any built-in action; it opens the *Recent games* list, or the game browser when you haven't played anything yet
-- a **homescreen list** of the games you played last, switched on in Simple UI's *Arrange* list: tap a game to resume it (*saved* marks one with an autosave), and choose how many are listed in the module's *Games shown* setting
 
 ## About interactive fiction games
 
@@ -81,6 +81,8 @@ Playing is a conversation with the story. The game describes where you are and w
 By the end of the '80s, interactive fiction was replaced by point-and-click adventure games, with nicer graphics and animation, more intuitive interfaces, and sound and music.
 
 However, the genre survived as a subculture, kept alive by enthusiasts. The parsers became more sophisticated, allowing more natural interaction, and the genre still offers gameplay mechanics that no other genre does. *Counterfeit Monkey* takes you to an island shaped by linguistics, where you manipulate words instead of objects; *Coloratura* shows our world through the eyes of an alien creature that perceives emotions and energies instead of light and objects. Best of all: these games are mostly free!
+
+New to the genre? The [beginner's tutorial](TUTORIAL.md) walks you through a first game: the commands worth knowing, how to get unstuck, how the plugin's controls work on an e-reader, and a list of games to start with.
 
 To get IF games, use the plugin's *Find games on IFDB…* entry, or check one of the dedicated websites: [IFDB](https://ifdb.org/search?browse) or [IFWiki](https://www.ifwiki.org/Special:Drilldown/Games).
 

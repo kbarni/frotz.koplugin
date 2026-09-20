@@ -43,8 +43,13 @@ local _plugin_dir = debug.getinfo(1, "S").source:match("@(.+)/[^/]+$") or "."
 
 -- Row geometry at 100% scale. Simple UI passes ctx.landscape_factor (a scale
 -- multiplier) which we honour so the rows match neighbouring modules.
-local _BASE_ROW_H = Screen:scaleBySize(34)  -- one game's row
-local _BASE_FS    = Screen:scaleBySize(17)  -- title font size
+local _BASE_ROW_H = Screen:scaleBySize(34)  -- one game's row, in pixels
+-- Font sizes are *points*, not pixels: Font:getFace() runs the size through
+-- Screen:scaleBySize() itself, so scaling here too made the titles render at
+-- roughly DPI-squared — visibly oversized on high-DPI devices (Kindle) while
+-- looking right in the emulator. 16 sits just under Simple UI's own body text
+-- (SUIStyle.FS_BODY = 18), which suits a compact list of rows.
+local _BASE_FS    = 16                      -- title font size
 
 -- Width-independent vertical metrics, shared by build() and getHeight() so the
 -- height Simple UI reserves matches the widget actually rendered. A
@@ -52,7 +57,7 @@ local _BASE_FS    = Screen:scaleBySize(17)  -- title font size
 local function _dims(ctx)
     local scale  = ctx and ctx.landscape_factor or 1
     local row_h  = math.max(Screen:scaleBySize(24), math.floor(_BASE_ROW_H * scale))
-    local fs     = math.max(11, math.floor(_BASE_FS * scale))
+    local fs     = math.max(10, math.floor(_BASE_FS * scale))
     local pad    = Size.padding.default
     local border = Size.border.thin
     local line   = Size.line.thin
