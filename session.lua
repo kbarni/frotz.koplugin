@@ -20,7 +20,7 @@ if not ok_lfs then lfs = require("lfs") end
 local ok_log, logger = pcall(require, "logger")
 if not ok_log then logger = { info = function() end, warn = function() end } end
 
--- A short sleep, used only to let the spawning shell write the pidfile.
+-- A short sleep, used to poll for the pidfile the spawning shell writes.
 local sleep
 local ok_ffi, ffiUtil = pcall(require, "ffi/util")
 if ok_ffi then
@@ -72,13 +72,20 @@ function Session:new(vm_binary, gamefile, extra_args)
     )
     os.execute(cmd)
 
-    sleep(200000)  -- 200 ms: let the shell write the pidfile
-
+    -- Wait for the shell to write the pidfile. 200 ms first, which also lets
+    -- the child open the FIFO's read end before we open its write end; then
+    -- poll up to 2 s in all, because a slow or busy e-reader can take longer
+    -- and a fixed wait then blamed the binary (diagnose.lua's PID_WAIT_MS).
+    sleep(200000)
     local pid
-    local pf = io.open(pid_file, "r")
-    if pf then
-        pid = tonumber(pf:read("*l"))
-        pf:close()
+    for _ = 1, 90 do
+        local pf = io.open(pid_file, "r")
+        if pf then
+            pid = tonumber(pf:read("*l"))
+            pf:close()
+        end
+        if pid then break end
+        sleep(20000)
     end
     if not pid then
         os.execute(string.format("rm -f '%s' '%s' '%s' '%s'",

@@ -5,6 +5,7 @@ local LuaSettings     = require("luasettings")
 local lfs             = require("libs/libkoreader-lfs")
 local PathChooser     = require("ui/widget/pathchooser")
 local RenderText      = require("ui/rendertext")
+local TextViewer      = require("ui/widget/textviewer")
 local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -145,6 +146,15 @@ function Frotz:_buildMenuItems()
             sub_item_table = recent,
         })
     end
+
+    table.insert(items, {
+        text     = _("Diagnose interpreter…"),
+        callback = function()
+            -- The last played game doubles as the handshake test.
+            local last = self:_recentGames()[1]
+            self:_runDiagnosis(last and lfs.attributes(last, "mode") and last or nil)
+        end,
+    })
 
     return items
 end
@@ -387,6 +397,76 @@ function Frotz:_autosavePathFor(gamefile)
     return self:_saveDirFor(gamefile) .. "/autosave" .. save_ext_for(gamefile)
 end
 
+-- Arguments the VM gets before the story file. bocfel re-plays the whole
+-- transcript ("[Starting history playback]") on a verb restore unless -H is
+-- given; git (Glulx) has no such replay and rejects the flag, so only bocfel
+-- gets it. qjs takes the Twine player script first, then the story file.
+-- data: images are decoded into the game's save folder, not /tmp (a small RAM
+-- disk on e-readers).
+local function vm_args(vm, save_dir)
+    if vm == "bocfel" then
+        return { "-H" }
+    elseif vm == "twine" then
+        return { _plugin_dir .. "/twine/player.js", "--images=" .. save_dir .. "/images" }
+    end
+end
+
+-- ── Diagnosis ─────────────────────────────────────────────────────────────────
+-- diagnose.lua checks the binaries, /tmp and the spawn, then starts `gamefile`
+-- (optional) the way the plugin does; the report opens in a TextViewer and the
+-- detail goes to DataDir/frotz_diag.log.
+
+function Frotz:_runDiagnosis(gamefile)
+    local game
+    local vm = gamefile and Resolver.vm_for(gamefile)
+    if vm then
+        local exe = (vm == "twine") and "qjs" or vm
+        game = {
+            vm         = vm,
+            binary     = _plugin_dir .. "/binaries/" .. _arch .. "/" .. exe,
+            gamefile   = gamefile,
+            extra_args = vm_args(vm, self:_saveDirFor(gamefile)),
+        }
+    end
+    local wait = InfoMessage:new{ text = _("Checking the interpreter…\nThis takes a few seconds.") }
+    UIManager:show(wait)
+    UIManager:forceRePaint()
+    UIManager:nextTick(function()
+        local data_dir = DataStorage:getDataDir()
+        local ok, report = pcall(require("diagnose").run, {
+            plugin_dir = _plugin_dir,
+            arch       = _arch,
+            game       = game,
+            log_path   = data_dir .. "/frotz_diag.log",
+            crash_logs = { data_dir .. "/crash.log", "crash.log" },
+        })
+        UIManager:close(wait)
+        if not ok then
+            logger.err("Frotz: diagnosis failed:", report)
+            UIManager:show(InfoMessage:new{ text = _("The diagnosis itself failed:\n") .. tostring(report) })
+            return
+        end
+        logger.info("Frotz: diagnosis written to", report.log_path)
+        local text = report.text
+        if gamefile then
+            text = T(_("Game tested: %1"), gamefile) .. "\n\n" .. text
+        end
+        UIManager:show(TextViewer:new{
+            title = _("Interpreter diagnosis"),
+            text  = text,
+        })
+    end)
+end
+
+-- Ask before diagnosing: it takes a few seconds.
+function Frotz:_offerDiagnosis(message, gamefile)
+    UIManager:show(ConfirmBox:new{
+        text        = message .. "\n\n" .. _("Run a diagnosis to find out why?"),
+        ok_text     = _("Diagnose"),
+        ok_callback = function() self:_runDiagnosis(gamefile) end,
+    })
+end
+
 function Frotz:_startGame(gamefile)
     local Session  = require("session")
     local GameView = require("gameview")
@@ -410,9 +490,7 @@ function Frotz:_startGame(gamefile)
     end
     local binary = binary_for(vm)
     if not binary then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Interpreter binary not found: %1 (arch %2)"), vm, _arch),
-        })
+        self:_offerDiagnosis(T(_("Interpreter binary not found: %1 (arch %2)"), vm, _arch), gamefile)
         return
     end
 
@@ -458,34 +536,20 @@ function Frotz:_startGame(gamefile)
     util.makePath(save_dir)
     local autosave_path = self:_autosavePathFor(gamefile)
 
-    -- bocfel re-plays the whole transcript ("[Starting history playback]") on a
-    -- verb restore unless -H is given; git (Glulx) has no such replay and rejects
-    -- the flag, so only pass it to bocfel. qjs takes the Twine player script
-    -- first, then the story file.
     local is_twine = vm == "twine"
-    local extra_args = nil
-    if vm == "bocfel" then
-        extra_args = { "-H" }
-    elseif is_twine then
-        local player = _plugin_dir .. "/twine/player.js"
-        if not lfs.attributes(player, "mode") then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Twine player not found: %1"), player),
-            })
-            return
-        end
-        -- data: images are decoded into the game's save folder, not /tmp
-        -- (a small RAM disk on e-readers).
-        extra_args = { player, "--images=" .. save_dir .. "/images" }
+    local extra_args = vm_args(vm, save_dir)
+    if is_twine and not lfs.attributes(extra_args[1], "mode") then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Twine player not found: %1"), extra_args[1]),
+        })
+        return
     end
 
     local function launch(auto_restore)
         local ok, transport = pcall(Session.new, Session, binary, gamefile, extra_args)
         if not ok then
-            UIManager:show(InfoMessage:new{
-                text = _("Failed to start interpreter:\n") .. tostring(transport),
-            })
             logger.err("Frotz: session error:", transport)
+            self:_offerDiagnosis(_("Failed to start interpreter:\n") .. tostring(transport), gamefile)
             return
         end
         local engine = RemGlk:new(transport, rapidjson, engine_cols, rows)
@@ -513,6 +577,10 @@ function Frotz:_startGame(gamefile)
             ui           = self.ui,
             on_close     = function()
                 self._game_view = nil
+            end,
+            -- The VM died before the game got going: offer the diagnosis.
+            on_startup_failure = function()
+                self:_runDiagnosis(gamefile)
             end,
         }
         self._game_view = game_view

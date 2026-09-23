@@ -13,6 +13,8 @@ It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the
 
 The plugin is text-focused. Illustrations *are* available: the story shows a link (e.g. `[Illustration 3]`), and tapping it (or the menu's **Illustrations** entry) opens the picture in KOReader's image viewer. Decorative and repeated images (borders in Glulx games, graphical page elements in Twine games) are left out. For full graphics support, use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
 
+**Interactive Fiction games are unlike modern games. If you never played interactive fiction before, read the [beginner's tutorial](TUTORIAL.md) and the small introduction to interactive fiction below.S**
+
 ## Features
 
 - Should work on most platforms where KOReader is available
@@ -60,6 +62,10 @@ chmod +x git
 chmod +x tadsr
 chmod +x qjs
 ```
+
+### When a game won't start
+
+If the interpreter fails to start or stops before the game appears, the plugin offers to **diagnose** the problem. You can also run the diagnosis at any time from **Interactive Fiction → Diagnose interpreter…**, which tests the last game you played. It checks the binaries, the device's `/tmp` and process start-up, then launches the game. You get a short report in plain words, and the details are written to `frotz_diag.log` in the KOReader folder (e.g. `/mnt/us/koreader/frotz_diag.log` on a Kindle). Please attach that file when you report a problem.
 
 ### Finding games
 

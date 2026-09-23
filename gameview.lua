@@ -140,6 +140,9 @@ local GameView = FrameContainer:extend{
     -- (the caller already has an authoritative title, e.g. from IFDB).
     on_title    = nil,
     keep_title  = false,
+    -- Called (after the view closes) when the VM stops before it ever asked
+    -- for input, so the caller can run its diagnosis.
+    on_startup_failure = nil,
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -988,6 +991,20 @@ function GameView:_pollStep()
         return
     end
 
+    -- Until the game has asked for input once, a VM that dies (bad binary,
+    -- broken story, crash on load) should not cost the full timeout: check
+    -- every second or so. Later turns keep the cheap poll.
+    if not self._started then
+        self._startup_polls = (self._startup_polls or 0) + 1
+        if self._startup_polls % 20 == 0 and not self.engine:is_alive() then
+            update = self.engine:poll()   -- whatever it wrote before dying
+            self._polling = false
+            if update then self:_applyUpdate(update) end
+            if not update or not update.exited then self:_onGameEnded() end
+            return
+        end
+    end
+
     if (time.now() - self._poll_start) >= time.s(POLL_TIMEOUT_S) then
         self._polling = false
         if not self.engine:is_alive() then
@@ -1066,6 +1083,7 @@ function GameView:_takeInput(u)
         self._timer_ms = u.timer or nil
     end
     if u.input then
+        self._started      = true
         self._input_kind   = u.input.kind
         self._input_window = u.input.window
         self._input_links  = u.input.hyperlink == true
@@ -1680,6 +1698,23 @@ end
 -- ── Game-ended handler ─────────────────────────────────────────────────────────
 
 function GameView:_onGameEnded()
+    -- Ended before ever asking for input: the game never started, and that is
+    -- the interpreter failing, not a finished story.
+    if not self._started and self.on_startup_failure then
+        UIManager:show(ConfirmBox:new{
+            text        = _("The interpreter stopped before the game could start.")
+                          .. "\n\n" .. _("Run a diagnosis to find out why?"),
+            ok_text     = _("Diagnose"),
+            cancel_text = _("Close"),
+            ok_callback = function()
+                local diagnose = self.on_startup_failure
+                self:onClose()
+                diagnose()
+            end,
+            cancel_callback = function() self:onClose() end,
+        })
+        return
+    end
     UIManager:show(ConfirmBox:new{
         text        = _("The game has ended. Close the game view?"),
         ok_text     = _("Close"),
