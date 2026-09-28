@@ -36,9 +36,11 @@ local Ifdb        = require("ifdb")
 local Resolver    = require("engines/resolver")
 
 local FORMAT_LABELS = {
+    all   = _("All"),
     both  = _("Z-machine + Glulx"),
     zcode = _("Z-machine"),
     glulx = _("Glulx"),
+    twine = _("Twine"),
 }
 
 local PRESET_LABELS = {
@@ -85,8 +87,8 @@ function IfdbBrowser:_saveSetting(key, value)
 end
 
 function IfdbBrowser:_formatChoice()
-    local f = self:_setting("ifdb_format", "both")
-    return FORMAT_LABELS[f] and f or "both"
+    local f = self:_setting("ifdb_format", "all")
+    return FORMAT_LABELS[f] and f or "all"
 end
 
 -- A dedicated setting, not the file browser's game_directory: that one follows
@@ -216,11 +218,11 @@ end
 
 -- A listing is one result list plus what's needed to fetch more of it.
 -- server_filtered: IFDB already restricted it to our formats; otherwise rows
--- from authoring systems we can't play are held back in `hidden`.
-local function newListing(title, requests, sortby, server_filtered)
+-- from authoring systems outside format_choice are held back in `hidden`.
+local function newListing(title, requests, sortby, server_filtered, format_choice)
     return {
         title = title, requests = requests, sortby = sortby,
-        server_filtered = server_filtered,
+        server_filtered = server_filtered, format_choice = format_choice,
         page = 1, rows = {}, hidden = {}, seen = {}, more = false,
     }
 end
@@ -246,7 +248,7 @@ function IfdbBrowser:_loadPage(listing)
     if listing.server_filtered then
         for _i, g in ipairs(merged) do table.insert(listing.rows, g) end
     else
-        local kept, hidden = Ifdb.splitBySystem(merged)
+        local kept, hidden = Ifdb.splitBySystem(merged, listing.format_choice)
         for _i, g in ipairs(kept) do table.insert(listing.rows, g) end
         for _i, g in ipairs(hidden) do table.insert(listing.hidden, g) end
     end
@@ -262,7 +264,7 @@ function IfdbBrowser:_openListing(listing, fallback_requests)
             -- IFDB rejected the filtered query: retry unfiltered and narrow
             -- the results by authoring system instead.
             logger.info("IFDB: filtered query failed, retrying unfiltered:", err)
-            listing = newListing(listing.title, fallback_requests, "rel", false)
+            listing = newListing(listing.title, fallback_requests, "rel", false, listing.format_choice)
             ok, err = self:_loadPage(listing)
         end
         if not ok then return self:_showError(err) end
@@ -324,8 +326,8 @@ end
 function IfdbBrowser:_openPreset(preset)
     local f = self:_formatChoice()
     local title = PRESET_LABELS[preset.id]
-    if f ~= "both" then title = title .. " · " .. FORMAT_LABELS[f] end
-    self:_openListing(newListing(title, Ifdb.presetQueries(preset, f), preset.sortby, true))
+    if f ~= "all" then title = title .. " · " .. FORMAT_LABELS[f] end
+    self:_openListing(newListing(title, Ifdb.presetQueries(preset, f), preset.sortby, true, f))
 end
 
 function IfdbBrowser:_showSearchDialog()
@@ -359,9 +361,10 @@ function IfdbBrowser:_showSearchDialog()
 end
 
 function IfdbBrowser:_search(text)
-    local requests, filtered = Ifdb.searchQueries(text, self:_formatChoice())
+    local f = self:_formatChoice()
+    local requests, filtered = Ifdb.searchQueries(text, f)
     local listing = newListing(T(_("Search: %1"), text), requests,
-                               filtered and "ratu" or "rel", filtered)
+                               filtered and "ratu" or "rel", filtered, f)
     local fallback = filtered and { { query = text } } or nil
     self:_openListing(listing, fallback)
 end
@@ -426,7 +429,7 @@ function IfdbBrowser:_describe(game, links)
             line(T(_("%1 other downloads available."), #links - 1))
         end
     else
-        line(_("No Z-machine or Glulx download is listed for this game."))
+        line(_("No download this plugin can play is listed for this game (web pages such as itch.io are not downloads)."))
         if game.devsys then line(T(_("Authoring system: %1"), game.devsys)) end
     end
     return table.concat(out, "\n")
@@ -580,13 +583,13 @@ function IfdbBrowser:_download(game, link, dir, target, done)
     if cover_path and not lfs.attributes(cover_path, "mode") then cover_file = nil end
 
     if link.zip then
-        self:_unzip(game, target, dir, cover_file, done)
+        self:_unzip(game, link, target, dir, cover_file, done)
     else
         self:_finish(game, target, cover_file, done)
     end
 end
 
-function IfdbBrowser:_unzip(game, zip_path, dir, cover_file, done)
+function IfdbBrowser:_unzip(game, link, zip_path, dir, cover_file, done)
     local Archiver = require("ffi/archiver")
     local reader = Archiver.Reader:new()
     if not reader:open(zip_path) then
@@ -599,13 +602,35 @@ function IfdbBrowser:_unzip(game, zip_path, dir, cover_file, done)
     for entry in reader:iterate() do
         if entry.mode == "file" then paths[#paths + 1] = entry.path end
     end
-    local members = Ifdb.playableMembers(paths, Resolver)
+    local members = Ifdb.playableMembers(paths, Resolver, link.vm)
+    if link.vm == "twine" then
+        -- Names can't tell a story from any other HTML page (credits, a web
+        -- player's shell); the content can.
+        local stories = {}
+        for _i, member in ipairs(members) do
+            if Resolver.has_twine_marker(reader:extractToMemory(member)) then
+                stories[#stories + 1] = member
+            end
+        end
+        members = stories
+    end
 
     local function extract(member)
         local base   = member:match("([^/]+)$")
         local target = dir .. "/" .. Ifdb.safeFileName(base)
         local ok     = reader:extractToPath(member, target)
         local err    = reader.err
+        if ok and link.vm == "twine" then
+            -- A Twine story shows pictures from files beside it: bring them
+            -- along (not its sounds or fonts), at the paths the story uses.
+            for _i, asset in ipairs(Ifdb.assetMembers(paths, member)) do
+                local dest = dir .. "/" .. asset.rel
+                util.makePath((util.splitFilePathName(dest)))
+                if not reader:extractToPath(asset.member, dest) then
+                    logger.warn("IFDB: could not extract", asset.member, reader.err)
+                end
+            end
+        end
         reader:close()
         if not ok then
             UIManager:show(InfoMessage:new{
@@ -620,7 +645,7 @@ function IfdbBrowser:_unzip(game, zip_path, dir, cover_file, done)
     if #members == 0 then
         reader:close()
         UIManager:show(InfoMessage:new{
-            text = T(_("The zip file has no Z-machine or Glulx story file in it. It was kept at:\n%1"), zip_path),
+            text = T(_("The zip file has no story file this plugin can play in it. It was kept at:\n%1"), zip_path),
         })
     elseif #members == 1 then
         extract(members[1])

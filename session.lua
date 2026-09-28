@@ -20,7 +20,7 @@ if not ok_lfs then lfs = require("lfs") end
 local ok_log, logger = pcall(require, "logger")
 if not ok_log then logger = { info = function() end, warn = function() end } end
 
--- A short sleep, used only to let the spawning shell write the pidfile.
+-- A short sleep, used to poll for the pidfile the spawning shell writes.
 local sleep
 local ok_ffi, ffiUtil = pcall(require, "ffi/util")
 if ok_ffi then
@@ -31,6 +31,17 @@ end
 
 local Session = {}
 Session.__index = Session
+
+-- Single-quote a word for /bin/sh, apostrophes included.
+local function q(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+
+local function read_small(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local s = f:read(2000)
+    f:close()
+    return s
+end
 
 -- vm_binary: absolute path to bocfel or git
 -- gamefile:  absolute path to the story file
@@ -46,7 +57,9 @@ function Session:new(vm_binary, gamefile, extra_args)
     local err_file = base .. "_err.txt"
     local pid_file = base .. "_pid.txt"
 
-    os.execute("mkfifo '" .. fifo_in .. "'")
+    local sh_file  = base .. "_sh.txt"
+
+    os.execute("mkfifo " .. q(fifo_in))
     local f = io.open(out_file, "w"); if f then f:close() end
 
     -- The shell opens the FIFO read-end (via the VM's stdin redirect) before we
@@ -55,7 +68,7 @@ function Session:new(vm_binary, gamefile, extra_args)
     -- stream on stdout.
     local args = ""
     for _, a in ipairs(extra_args or {}) do
-        args = args .. "'" .. a .. "' "
+        args = args .. q(a) .. " "
     end
     -- Force the C locale on the VM child. bocfel snapshots undo state every turn
     -- and timestamps it via std::locale("") (stack.cpp format_time), which makes
@@ -66,31 +79,52 @@ function Session:new(vm_binary, gamefile, extra_args)
     -- bocfel's own try/catch can't save it. LC_ALL=C keeps glibc on the built-in
     -- C locale (no external data loaded) and never reaches the bad path. Harmless
     -- for git, which doesn't touch locales.
+    --
+    -- The group's own stderr goes to sh_file: when the pidfile never shows up,
+    -- the shell's complaint (a bad redirect, a full /tmp, …) is the only clue,
+    -- and the error below carries it into crash.log and the diagnosis.
     local cmd = string.format(
-        "LC_ALL=C LANG=C '%s' %s'%s' < '%s' > '%s' 2> '%s' & echo $! > '%s'",
-        vm_binary, args, gamefile, fifo_in, out_file, err_file, pid_file
+        "{ LC_ALL=C LANG=C %s %s%s < %s > %s 2> %s & echo $! > %s; } 2> %s",
+        q(vm_binary), args, q(gamefile), q(fifo_in), q(out_file), q(err_file),
+        q(pid_file), q(sh_file)
     )
-    os.execute(cmd)
+    local sh_status = os.execute(cmd)
 
-    sleep(200000)  -- 200 ms: let the shell write the pidfile
-
+    -- Wait for the shell to write the pidfile. 200 ms first, which also lets
+    -- the child open the FIFO's read end before we open its write end; then
+    -- poll up to 2 s in all, because a slow or busy e-reader can take longer
+    -- and a fixed wait then blamed the binary (diagnose.lua's PID_WAIT_MS).
+    sleep(200000)
     local pid
-    local pf = io.open(pid_file, "r")
-    if pf then
-        pid = tonumber(pf:read("*l"))
-        pf:close()
+    for _ = 1, 90 do
+        local pf = io.open(pid_file, "r")
+        if pf then
+            pid = tonumber(pf:read("*l"))
+            pf:close()
+        end
+        if pid then break end
+        sleep(20000)
     end
     if not pid then
-        os.execute(string.format("rm -f '%s' '%s' '%s' '%s'",
-            fifo_in, out_file, err_file, pid_file))
-        error("Failed to start VM — binary missing or not executable: " .. vm_binary)
+        -- The `& echo $!` writes a PID even when the VM itself cannot run, so
+        -- landing here means the shell or /tmp failed, not the binary.
+        local pid_size = lfs.attributes(pid_file, "size")
+        local sh_err = (read_small(sh_file) or ""):gsub("%s+$", "")
+        local detail = string.format("shell status %s; pid file %s",
+            tostring(sh_status),
+            pid_size == nil and "missing" or pid_size == 0 and "empty" or "unreadable")
+        if sh_err ~= "" then detail = detail .. "; shell said: " .. sh_err end
+        os.execute(string.format("rm -f %s %s %s %s %s", q(fifo_in), q(out_file),
+            q(err_file), q(pid_file), q(sh_file)))
+        error("Failed to start VM (" .. detail .. "): " .. vm_binary, 0)
     end
+    os.remove(sh_file)
 
     local stdin_handle = io.open(fifo_in, "w")
     if not stdin_handle then
         os.execute("kill " .. pid .. " 2>/dev/null")
-        os.execute(string.format("rm -f '%s' '%s' '%s' '%s'",
-            fifo_in, out_file, err_file, pid_file))
+        os.execute(string.format("rm -f %s %s %s %s",
+            q(fifo_in), q(out_file), q(err_file), q(pid_file)))
         error("Failed to open input pipe to VM")
     end
 
@@ -146,8 +180,8 @@ function Session:terminate()
         os.execute("kill -9 " .. self.pid .. " 2>/dev/null")
         self.pid = nil
     end
-    os.execute(string.format("rm -f '%s' '%s' '%s' '%s'",
-        self.fifo_in, self.out_file, self.err_file, self.pid_file))
+    os.execute(string.format("rm -f %s %s %s %s",
+        q(self.fifo_in), q(self.out_file), q(self.err_file), q(self.pid_file)))
     logger.info("RemGlk session: terminated")
 end
 

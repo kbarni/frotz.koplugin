@@ -19,18 +19,31 @@
 --   * free text combined with `format:` makes IFDB return {"error":…}, so only
 --     filters-only queries get the format filter. Free-text results are
 --     narrowed on our side by authoring system instead (isLikelySupported).
+-- Twine has no file format of its own on IFDB (its links are `hypertextgame`,
+-- shared with web ports of parser games), so it is selected by authoring
+-- system: `system:twine`, which IFDB also accepts next to free text.
 
 local M = {}
 
 M.BASE      = "https://ifdb.org"
 M.PAGE_SIZE = 100  -- IFDB's fixed page size; a full page means "maybe more"
 
--- Format choice → the IFDB filter that selects it.
+-- Format key → the IFDB filter that selects it.
 M.FORMAT_FILTERS = {
     zcode = "format:*z-code*",
     glulx = "format:*glulx*",
+    twine = "system:twine",
 }
-M.FORMAT_CHOICES = { "both", "zcode", "glulx" }
+-- Format choice (the browser's setting) → the format keys it covers. "both"
+-- predates Twine support and keeps meaning Z-machine + Glulx.
+M.FORMAT_SETS = {
+    all   = { "zcode", "glulx", "twine" },
+    both  = { "zcode", "glulx" },
+    zcode = { "zcode" },
+    glulx = { "glulx" },
+    twine = { "twine" },
+}
+M.FORMAT_CHOICES = { "all", "both", "zcode", "glulx", "twine" }
 
 -- Browse lists. IFDB returns nothing for an empty query, so each preset carries
 -- at least the format filter (added by presetQueries).
@@ -54,10 +67,17 @@ M.LINK_FORMATS = {
 -- Authoring systems that never produce Z-code or Glulx. Matched as whole words
 -- against the lowercased `devsys`, so "ink" does not hit "Inform".
 local UNSUPPORTED_SYSTEMS = {
-    "tads", "adrift", "hugo", "alan", "twine", "quest", "choicescript", "ink",
+    "tads", "adrift", "hugo", "alan", "quest", "choicescript", "ink",
     "inklewriter", "ren'py", "renpy", "adventuron", "texture", "squiffy",
     "undum", "raconteur", "ramus", "agt", "ags", "unity", "rpg maker",
 }
+
+-- Authoring systems whose games are Twine HTML (IFDB lists most as "Twine",
+-- a few as "Twine, Harlowe"). Matched like UNSUPPORTED_SYSTEMS.
+local TWINE_SYSTEMS = { "twine", "harlowe", "sugarcube", "chapbook", "snowman", "tweego" }
+
+-- Zip members that are pages about the story rather than the story.
+local NOT_STORY_PAGES = { "walkthrough", "%f[%a]hints?%f[%A]", "solution", "readme", "credits", "offline" }
 
 -- ── small helpers ────────────────────────────────────────────────────────────
 
@@ -134,10 +154,16 @@ function M.isFiltersOnly(query)
     return true
 end
 
---- Format choice → list of format keys to query.
+--- Format choice → list of format keys to query (unknown choices mean all).
 local function formatsFor(choice)
-    if choice == "zcode" or choice == "glulx" then return { choice } end
-    return { "zcode", "glulx" }
+    return M.FORMAT_SETS[choice] or M.FORMAT_SETS.all
+end
+
+local function includes(choice, key)
+    for _, f in ipairs(formatsFor(choice)) do
+        if f == key then return true end
+    end
+    return false
 end
 
 --- The IFDB requests behind one user search. Returns a list of
@@ -151,6 +177,10 @@ function M.searchQueries(text, format_choice)
             out[#out + 1] = { query = text .. " " .. M.FORMAT_FILTERS[f], format = f }
         end
         return out, true
+    end
+    if format_choice == "twine" then
+        -- Unlike format:, system: works alongside free text.
+        return { { query = text .. " " .. M.FORMAT_FILTERS.twine .. " downloadable:yes", format = "twine" } }, true
     end
     return { { query = text .. " downloadable:yes" } }, false
 end
@@ -259,31 +289,45 @@ function M.mergeResults(lists, sortby, seen)
     return out, seen
 end
 
-local function isUnsupportedSystem(name)
+local function systemIn(list, name)
     local d = " " .. name:lower():gsub("[^%w']+", " ") .. " "
-    for _, sys in ipairs(UNSUPPORTED_SYSTEMS) do
+    for _, sys in ipairs(list) do
         if d:find(" " .. sys .. " ", 1, true) then return true end
     end
     return false
 end
 
---- Whether a game's authoring system can produce Z-code or Glulx. Unknown or
---- custom systems count as yes: the detail screen gives the real answer. A
---- game listed under several systems ("TADS 2, Inform 6") is kept if any of
---- them might be ours.
-function M.isLikelySupported(devsys)
+--- Whether a game's authoring system (IFDB's `devsys`) is Twine.
+function M.isTwineSystem(devsys)
+    return type(devsys) == "string" and systemIn(TWINE_SYSTEMS, devsys)
+end
+
+--- Whether a game's authoring system can produce a format of the choice:
+--- Z-code/Glulx for any system not known to be something else, Twine for the
+--- Twine systems. Unknown or custom systems count as yes: the detail screen
+--- gives the real answer. A game listed under several systems ("TADS 2,
+--- Inform 6") is kept if any of them might be ours.
+function M.isLikelySupported(devsys, format_choice)
     if not devsys or devsys == "" then return true end
+    local parser = includes(format_choice, "zcode") or includes(format_choice, "glulx")
+    local twine  = includes(format_choice, "twine")
     for part in devsys:gmatch("[^,/;]+") do
-        if part:match("%S") and not isUnsupportedSystem(part) then return true end
+        if part:match("%S") then
+            if systemIn(TWINE_SYSTEMS, part) then
+                if twine then return true end
+            elseif parser and not systemIn(UNSUPPORTED_SYSTEMS, part) then
+                return true
+            end
+        end
     end
     return false
 end
 
 --- Split rows into those shown by default and those hidden by system.
-function M.splitBySystem(games)
+function M.splitBySystem(games, format_choice)
     local kept, hidden = {}, {}
     for _, g in ipairs(games) do
-        if M.isLikelySupported(g.devsys) then kept[#kept + 1] = g
+        if M.isLikelySupported(g.devsys, format_choice) then kept[#kept + 1] = g
         else hidden[#hidden + 1] = g end
     end
     return kept, hidden
@@ -409,20 +453,32 @@ end
 --- The game's download links we can play, best first. Each entry is the link
 --- plus: zip (bool), vm, label (format description), filename (what to save
 --- it as — for a zip, the archive's own name).
+--- An .html link, or a zip tagged `hypertextgame`, is a Twine story only when
+--- the game's authoring system (game.devsys, from the search row) is Twine;
+--- for any other game it is a web port (Parchment, Quixe…) and is skipped.
 -- @param resolver  engines/resolver.lua (injected to keep this module pure)
 function M.playableLinks(game, resolver)
     local out = {}
+    local twine_game = M.isTwineSystem(game.devsys)
     for i, l in ipairs(game.links or {}) do
         local name   = M.urlFileName(l.url)
         local ext    = extOf(name)
         local known  = l.format and M.LINK_FORMATS[l.format]
         local by_ext = name and resolver.vm_for(name)
         local zip    = ext == "zip"
+        local html   = by_ext == "twine"
         -- A URL with no file name is a web page (e.g. an iplayif.com player
-        -- wrapping the story), even when IFDB tags it zcode.
-        local keep   = l.is_game and name and (by_ext or known)
+        -- wrapping the story), even when IFDB tags it zcode; so is any .html
+        -- that is not a Twine game's story.
+        local twine  = twine_game and l.is_game and name
+                       and (html or (zip and l.format == "hypertextgame"))
+        local keep   = twine or (l.is_game and name and not html and (by_ext or known))
+        if twine then
+            known, by_ext = nil, "twine"
+        end
         if keep then
             local label = known and known.label
+                          or (by_ext == "twine" and "Twine")
                           or (by_ext == "git" and "Glulx" or "Z-machine")
             local filename = name
             if not zip and known and by_ext ~= known.vm then
@@ -453,15 +509,57 @@ function M.playableLinks(game, resolver)
     return out
 end
 
+local function isStoryPage(path)
+    local lower = path:lower()
+    for _, pat in ipairs(NOT_STORY_PAGES) do
+        if lower:find(pat) then return false end
+    end
+    return true
+end
+
 --- Members of a zip worth extracting: story files we can play, skipping
---- macOS resource forks. Takes a list of member paths.
-function M.playableMembers(paths, resolver)
-    local out = {}
+--- macOS resource forks. Takes a list of member paths and the download link's
+--- vm: a Twine zip yields its .html pages (walkthroughs and the like dropped
+--- unless nothing else is left), any other zip only non-HTML story files.
+function M.playableMembers(paths, resolver, vm)
+    local want_twine = vm == "twine"
+    local out, pages = {}, {}
     for _, p in ipairs(paths) do
         local base = p:match("([^/]+)$")
         if base and not p:find("__MACOSX/", 1, true) and not base:match("^%._")
-           and resolver.is_supported(base) then
-            out[#out + 1] = p
+           and resolver.is_supported(base)
+           and (resolver.vm_for(base) == "twine") == want_twine then
+            if not want_twine or isStoryPage(p) then
+                out[#out + 1] = p
+            else
+                pages[#pages + 1] = p
+            end
+        end
+    end
+    if #out == 0 then return pages end
+    return out
+end
+
+-- Picture files a Twine story can show (see twine/images.js).
+local IMAGE_EXTS = { png = true, jpg = true, jpeg = true, gif = true, webp = true, svg = true, bmp = true }
+
+--- The pictures to extract with a Twine story from its zip: image members in
+--- the story's own folder or below, as { member = <zip path>, rel = <path from
+--- the story's folder> }. Paths stay as they are because the story refers to
+--- them, so a member whose path could climb out of the folder or is not a valid
+--- FAT name is left out rather than renamed.
+function M.assetMembers(paths, story)
+    local prefix = story:match("^(.*/)") or ""
+    local out = {}
+    for _, p in ipairs(paths) do
+        if p ~= story and p:sub(1, #prefix) == prefix and not p:find("__MACOSX/", 1, true) then
+            local rel  = p:sub(#prefix + 1)
+            local base = rel:match("([^/]+)$")
+            if base and IMAGE_EXTS[extOf(base)] and not base:match("^%.")
+               and not rel:find('[%c\\:%*%?"<>|]')
+               and not ("/" .. rel .. "/"):find("/%.%.?/") then
+                out[#out + 1] = { member = p, rel = rel }
+            end
         end
     end
     return out

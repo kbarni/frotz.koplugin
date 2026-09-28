@@ -13,6 +13,12 @@
 --   2. How do we show it?  On demand only: we never hold a decoded image, we
 --      decode when the player opens one and hand ownership to the ImageViewer.
 --
+-- Twine stories use the same policy and viewer: their player sends a file path
+-- on each image span, and twineimages.lua stands in for the Blorb map (passed
+-- as `map`). It also sends `seen` — how often the picture was already shown on
+-- earlier passages — because every Twine update re-sends the whole page, so
+-- counting spans here would call a picture a repeat of itself.
+--
 -- Placeholders carry their own resource number ("[Illustration 3]"), so a tap
 -- on a transcript line can recover which image it means with parseLabel() —
 -- no bookkeeping that has to survive word-wrap and pagination.
@@ -122,7 +128,8 @@ end
 local ImageStore = {}
 ImageStore.__index = ImageStore
 
---- @param o { game_path = string, max_width = columns, mode = string }
+--- @param o { game_path = string, max_width = columns, mode = string,
+---            map = a Blorb-like map (twineimages.lua); default: the game's Blorb }
 function M.new(o)
     o = o or {}
     local self = setmetatable({
@@ -132,13 +139,18 @@ function M.new(o)
         _kind     = {},   -- resource → "show" | "rule" (last classification)
         _order    = {},   -- resources in order of first appearance
     }, ImageStore)
-    self.map = Blorb.openFor(o.game_path)
+    self.map = o.map or Blorb.openFor(o.game_path)
     return self
 end
 
+-- A map that fills in as the story runs (Twine) says itself whether it holds
+-- anything to show yet.
 function ImageStore:isAvailable()
-    return self.map ~= nil
+    return self.map ~= nil and (self.map.available == nil or self.map:available())
 end
+
+-- Formats behind which there is nothing to show.
+local NOT_VIEWABLE = { rect = true, unknown = true, missing = true, remote = true }
 
 function ImageStore:setMode(mode)
     self.mode = M.toMode(mode)
@@ -149,17 +161,25 @@ end
 function ImageStore:describe(span)
     local number = span and span.image
     if not number or not self.map then return nil end
+    if self.map.register then self.map:register(span) end
 
     local info = self.map:info(number)
     if not info then return nil end
 
-    local seen = self._count[number] or 0
-    if seen == 0 then self._order[#self._order + 1] = number end
-    self._count[number] = seen + 1
+    local count = self._count[number] or 0
+    if count == 0 then self._order[#self._order + 1] = number end
+    self._count[number] = count + 1
+    local seen = type(span.seen) == "number" and span.seen or count
 
     -- A Rect resource reserves space but holds no pixels: there would be
     -- nothing behind the placeholder, so say nothing.
     if info.format == "rect" then return nil end
+    -- A Twine picture we can't open (a web address, a file that isn't there):
+    -- its alt text, as a browser shows a broken image.
+    if info.format == "missing" or info.format == "remote" then
+        if info.alt and info.alt ~= "" then return "[" .. info.alt .. "]", "normal" end
+        return nil
+    end
 
     -- The VM's requested size is what the player would have seen; fall back to
     -- the image's own size when the game draws it unscaled.
@@ -207,7 +227,7 @@ end
 function ImageStore:isViewable(number)
     if not (self.map and number and self.map:has(number)) then return false end
     local info = self.map:info(number)
-    return info ~= nil and info.format ~= "rect" and info.format ~= "unknown"
+    return info ~= nil and not NOT_VIEWABLE[info.format]
 end
 
 -- Fit (w,h) inside (max_w,max_h) without upscaling or distorting.

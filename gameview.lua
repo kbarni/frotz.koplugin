@@ -31,6 +31,7 @@ local ptf              = require("ptfwrap")
 local monoface         = require("monoface")
 local StyledScroll     = require("styledscroll")
 local ImageStore       = require("imagestore")
+local TwineImages      = require("twineimages")
 
 -- Save slots shown in the Save/Restore pickers.  "autosave" is the slot written
 -- on close and offered at launch; the rest are manual slots.  The save files are
@@ -81,6 +82,10 @@ local TAP_HINT_PATTERN = "\n*%[Tap to continue…%]%s*$"
 -- screen is live (games write "Press SPACE" and nothing else). It spells out
 -- both routes because a tap can only ever mean Space: a menu that wants a
 -- particular key (Six's "press 1-5") is answered from the command field.
+-- When a Twine page changes in place, paging resumes this many already-read
+-- lines above the first change, so the change is seen in context.
+local PAGE_CONTEXT_LINES = 2
+
 local KEY_HINT         = "[Press a key: tap = Space, or type one below]"
 local KEY_HINT_PATTERN = "\n*%[Press a key: tap = Space, or type one below%]%s*$"
 
@@ -125,6 +130,19 @@ local GameView = FrameContainer:extend{
     auto_restore = false, -- restore the autosave once the intro settles
     ui         = nil,   -- hosting FileManager/ReaderUI, for dictionary lookup
     game_path  = nil,   -- the game file, read as a Blorb for its illustrations
+    -- Twine stories (qjs + twine/player.js) are played by tapping links, and
+    -- the player saves its own state instead of answering a save verb.
+    link_mode   = false,
+    state_saves = false,
+    save_ext    = ".qzl",
+    -- A story that reports its own title (Twine) renames the title bar and
+    -- tells the caller through on_title(title) — unless keep_title is set
+    -- (the caller already has an authoritative title, e.g. from IFDB).
+    on_title    = nil,
+    keep_title  = false,
+    -- Called (after the view closes) when the VM stops before it ever asked
+    -- for input, so the caller can run its diagnosis.
+    on_startup_failure = nil,
 }
 
 -- ── Initialisation ─────────────────────────────────────────────────────────────
@@ -141,6 +159,9 @@ function GameView:init()
     self._pending_lines   = {}         -- turn lines not yet revealed (pagination)
     self._input_kind      = nil        -- "line" | "char" | nil (turn in flight)
     self._input_window    = nil        -- window id the VM is waiting on
+    self._input_links     = false      -- the VM accepts a link tap this turn
+    self._links           = {}         -- this turn's links, reading order: {id, text}
+    self._last_marked     = nil        -- last Twine page, to skip identical repaints
     self._timer_pending   = false      -- a timer tick held back by an unread page
     self._keyboard_height = 0
     -- Default the on-screen keyboard OFF when a physical/Bluetooth keyboard is
@@ -152,7 +173,9 @@ function GameView:init()
     -- routes taps through FocusManager methods this view doesn't implement. With
     -- no OSK shown, the external keyboard drives the input field directly. The
     -- user can still toggle the OSK on from the menu if they want it.
-    self._keyboard_visible = not Device:hasKeyboard()   -- shown on startup unless a physical keyboard is active
+    -- A link-driven story needs no keyboard to start with (one opens when the
+    -- story asks for typed text).
+    self._keyboard_visible = not Device:hasKeyboard() and not self.link_mode
     self._sw              = Screen:getWidth()
     self._sh              = Screen:getHeight()
     -- Monospace typewriter faces (Courier Prime regular/bold/italic/bolditalic)
@@ -162,15 +185,18 @@ function GameView:init()
     -- them. Missing variants fall back to regular (and regular to bundled mono).
     self._faceset         = monoface.getFaceSet(self.font_size)
     self._face            = self._faceset.regular
-    self._autosave_path   = self.save_dir and (self.save_dir .. "/autosave.qzl") or nil
+    self._autosave_path   = self.save_dir and (self.save_dir .. "/autosave" .. self.save_ext) or nil
     -- Restore the autosave on the first settled turn (the intro), see _finishTurn.
     self._auto_restore_pending = self.auto_restore and self._autosave_path ~= nil
     -- Illustrations. RemGlk sends a Blorb resource number, never pixels, so we
     -- read the game's own Blorb and let imagestore.lua decide which images earn
     -- a line of transcript; the placeholders it returns are tappable, and
     -- everything the story has drawn stays reachable from the menu.
+    -- A Twine story (link_mode) has no Blorb: its player puts each picture's
+    -- file on the span, and twineimages.lua stands in for the Blorb map.
     self._images = ImageStore.new{
         game_path = self.game_path,
+        map       = self.link_mode and TwineImages.new() or nil,
         max_width = self.cols,
         mode      = self.settings and self.settings:readSetting("image_mode"),
     }
@@ -263,7 +289,7 @@ function GameView:_build()
 
     self._input_widget = InputText:new{
         text           = "",
-        hint           = _("Enter command…"),
+        hint           = self.link_mode and _("Tap a link, or type its text…") or _("Enter command…"),
         face           = self._face,
         width          = itext_w,
         height         = itext_h,
@@ -688,6 +714,15 @@ function GameView:_enableStoryTaps(stw)
 end
 
 function GameView:_onTapStory(tw, ges)
+    -- A link under the finger wins over paging: its text is on screen, and the
+    -- story is waiting for exactly this.
+    if not self._fs_text and self._input_links and not self._polling then
+        local id = self:_linkAtTap(tw, ges)
+        if id then
+            self:_sendHyperlink(id)
+            return true
+        end
+    end
     -- A picture under the finger wins: the game is waiting either way.
     if not self._fs_text and self._images and self._images:isAvailable() then
         local number = self:_illustrationAtTap(tw, ges)
@@ -737,6 +772,65 @@ function GameView:_illustrationAtTap(tw, ges)
         ImageStore.lineText(chars, line.offset, line.end_offset))
     if number and self._images:isViewable(number) then return number end
     return nil
+end
+
+-- The link id under a tap, from the per-character link map styledscroll
+-- builds. A tap just beside a link on the same line still counts (fingers are
+-- wider than letters). Bails out on any version-sensitive state it can't read.
+function GameView:_linkAtTap(tw, ges)
+    local links = tw._ptf_link
+    if not (links and next(links) and tw.use_xtext) then return nil end
+    local lines = tw.vertical_string_list
+    local line_h = tw.line_height_px
+    if not (lines and tw.dimen and line_h and line_h > 0) then return nil end
+    local row = (tw.virtual_line_num or 1) + math.floor((ges.pos.y - tw.dimen.y) / line_h)
+    local line = lines[row]
+    if not (line and line.offset and line.end_offset) then return nil end
+    tw:_shapeLine(line)
+    if not line.xglyphs then return nil end
+    local x = ges.pos.x - tw.dimen.x
+    local tolerance = self._face.size
+    local best, best_d
+    for _, xg in ipairs(line.xglyphs) do
+        local id = links[xg.text_index]
+        if id then
+            local x0, x1 = xg.x0, xg.x0 + (xg.x_advance or 0)
+            local d = (x < x0 and x0 - x) or (x > x1 and x - x1) or 0
+            if d == 0 then return id end
+            if not best_d or d < best_d then best, best_d = id, d end
+        end
+    end
+    if best and best_d <= tolerance then return best end
+    return nil
+end
+
+-- Choose a link from typed text: its number (reading order) or its label.
+function GameView:_linkFromTyped(raw)
+    local want = (raw or ""):match("^%s*(.-)%s*$")
+    if want == "" then return nil end
+    local links = self._links or {}
+    local n = tonumber(want)
+    if n and links[n] then return links[n].id end
+    local function norm(text)
+        local collapsed = (text or ""):gsub("%s+", " ")
+        return collapsed:match("^%s*(.-)%s*$"):lower()
+    end
+    want = norm(want)
+    for _, l in ipairs(links) do
+        if norm(l.text) == want then return l.id end
+    end
+    for _, l in ipairs(links) do
+        if norm(l.text):find(want, 1, true) then return l.id end
+    end
+    return nil
+end
+
+function GameView:_sendHyperlink(id)
+    if not (self.engine and id) or self._polling then return end
+    self:_cancelTimer()
+    self._awaiting_more = false
+    self.engine:send_hyperlink(self._input_window, id)
+    self:_startPolling()
 end
 
 function GameView:_viewIllustration(number)
@@ -845,6 +939,22 @@ function GameView:onSubmit()
         return
     end
 
+    -- Waiting for a link only (Twine): the field picks one by number or text,
+    -- for players with a keyboard.
+    if self._input_links and self._input_kind == nil then
+        local id = self:_linkFromTyped(raw)
+        if id then
+            self._input_widget:setText("")
+            self:_sendHyperlink(id)
+        elseif raw:find("%S") then
+            UIManager:show(InfoMessage:new{
+                text    = T(_("No link matches “%1”."), raw),
+                timeout = 2,
+            })
+        end
+        return
+    end
+
     -- line input: echo the command immediately for responsiveness. The VM also
     -- echoes it as an "input"-styled run, which _storyToBuf drops to avoid a dup.
     local cmd = raw:match("^%s*(.-)%s*$") or ""
@@ -865,6 +975,7 @@ function GameView:_startPolling()
     if self._polling then return end
     self._polling       = true
     self._input_kind    = nil   -- input disabled until the turn returns
+    self._input_links   = false
     self._timer_pending = false
     self._poll_start = time.now()
     UIManager:scheduleIn(POLL_INTERVAL_S, function() self:_pollStep() end)
@@ -880,9 +991,27 @@ function GameView:_pollStep()
         return
     end
 
+    -- Until the game has asked for input once, a VM that dies (bad binary,
+    -- broken story, crash on load) should not cost the full timeout: check
+    -- every second or so. Later turns keep the cheap poll.
+    if not self._started then
+        self._startup_polls = (self._startup_polls or 0) + 1
+        if self._startup_polls % 20 == 0 and not self.engine:is_alive() then
+            update = self.engine:poll()   -- whatever it wrote before dying
+            self._polling = false
+            if update then self:_applyUpdate(update) end
+            if not update or not update.exited then self:_onGameEnded() end
+            return
+        end
+    end
+
     if (time.now() - self._poll_start) >= time.s(POLL_TIMEOUT_S) then
         self._polling = false
-        if not self.engine:is_alive() then self:_onGameEnded() end
+        if not self.engine:is_alive() then
+            self:_onGameEnded()
+        else
+            self:_onNotResponding()
+        end
         return
     end
     UIManager:scheduleIn(POLL_INTERVAL_S, function() self:_pollStep() end)
@@ -895,6 +1024,22 @@ function GameView:_applyUpdate(u)
         self:_refreshDisplay()
         self:_onGameEnded()
         return
+    end
+
+    if u.title then self:_setStoryTitle(u.title) end
+
+    -- A Twine page re-sent unchanged (a (live:) tick that changed nothing, a
+    -- save's reply) must not cost an e-ink repaint: keep the page as it is and
+    -- just take the new input request.
+    if self.link_mode and u.cleared and not self._awaiting_more then
+        local marked = ptf.runs_to_marked(u.story)
+        if marked == self._last_marked then
+            self:_takeInput(u)
+            self:_armTurnTimer(u)
+            self:_reportUndo(u)
+            return
+        end
+        self._last_marked = marked
     end
 
     if u.cleared then
@@ -913,29 +1058,68 @@ function GameView:_applyUpdate(u)
     end
 
     self._turn_buf = self:_storyToBuf(u)
+    self._same_page = self.link_mode and u.samepage == true
 
-    -- RemGlk reports a timer interval only when it changes: a number sets it,
-    -- false cancels it, nil leaves it alone.
-    if u.timer ~= nil then
-        self._timer_ms = u.timer or nil
-    end
+    self:_takeInput(u)
 
-    if u.input then
-        self._input_kind   = u.input.kind
-        self._input_window = u.input.window
-    else
-        self._input_kind = nil
+    -- Twine: a story asking for typed text (a text box) opens the keyboard.
+    if self.link_mode and self._input_kind == "line" and not self._keyboard_visible
+            and not Device:hasKeyboard() then
+        self:_toggleKeyboard()
     end
 
     self:_finishTurn()
+    self:_armTurnTimer(u)
+    self:_reportUndo(u)
 
-    -- A turn that asks for no input at all is waiting on its timer, and nothing
-    -- the player does can move it — RemGlk hands timer events to the display
-    -- layer. Feed it, or the game hangs with input dead (Six's configuration
-    -- screens do exactly this). We deliberately do NOT tick while the game is
-    -- also waiting for input: that would repaint an e-ink screen every interval
-    -- for the whole turn, and the player's key ends the wait anyway.
-    if not u.input and not u.exited then
+    if u.exited then self:_onGameEnded() end
+end
+
+-- Take an update's input request and timer interval. RemGlk reports a timer
+-- interval only when it changes: a number sets it, false cancels it, nil
+-- leaves it alone.
+function GameView:_takeInput(u)
+    if u.timer ~= nil then
+        self._timer_ms = u.timer or nil
+    end
+    if u.input then
+        self._started      = true
+        self._input_kind   = u.input.kind
+        self._input_window = u.input.window
+        self._input_links  = u.input.hyperlink == true
+        self._links        = u.links or {}
+    else
+        self._input_kind  = nil
+        self._input_links = false
+        self._links       = {}
+    end
+end
+
+function GameView:_setStoryTitle(title)
+    if self.keep_title or title == self.game_title then return end
+    self.game_title = title
+    self._title_bar:setTitle(title)
+    UIManager:setDirty(self, "ui")
+    if self.on_title then self.on_title(title) end
+end
+
+function GameView:_reportUndo(u)
+    if u.undo and not u.undo.ok then
+        UIManager:show(InfoMessage:new{ text = _("There is nothing to undo."), timeout = 2 })
+    end
+end
+
+-- A turn that asks for no input at all is waiting on its timer, and nothing
+-- the player does can move it — RemGlk hands timer events to the display
+-- layer. Feed it, or the game hangs with input dead (Six's configuration
+-- screens do exactly this). We deliberately do NOT tick while a Glk game is
+-- also waiting for a key or a command: that would repaint an e-ink screen every
+-- interval for the whole turn, and the player's key ends the wait anyway. A
+-- page waiting only for a link tap (Twine) does tick: its timed text is the
+-- story, and an unchanged page costs no repaint (see _applyUpdate).
+function GameView:_armTurnTimer(u)
+    local links_only = u.input and u.input.hyperlink and not u.input.kind
+    if (not u.input or links_only) and not u.exited then
         if self._timer_ms then
             -- …but not while a page of this turn is still unread. The next
             -- update starts a fresh turn, and _finishTurn drops _pending_lines,
@@ -947,15 +1131,13 @@ function GameView:_applyUpdate(u)
             else
                 self:_scheduleTimer()
             end
-        else
-            -- No input request and no timer: the VM is blocked on something we
+        -- No input request and no timer: the VM is blocked on something we
             -- cannot supply, and nothing the player does will move it. Say so
             -- in the log rather than sitting there looking frozen.
+        elseif not links_only then
             logger.warn("Frotz: turn requested no input and set no timer; the game is waiting on something unsupported")
         end
     end
-
-    if u.exited then self:_onGameEnded() end
 end
 
 -- ── Timer events ───────────────────────────────────────────────────────────────
@@ -1005,7 +1187,7 @@ function GameView:_finishTurn()
     -- (Photopia's "Would you like instructions?") "restore" is an invalid answer
     -- and we can't tell the two apart, nor retry (the question just repeats). So
     -- on failure we stop and point the player at manual resume rather than loop.
-    if self._auto_restore_pending and self._input_kind == "line" then
+    if self._auto_restore_pending and self:_atSavePoint() then
         self._auto_restore_pending = false
         local ok, text = self:_engineRestore(self._autosave_path)
         if ok then
@@ -1022,13 +1204,51 @@ function GameView:_finishTurn()
     buf = buf:gsub("\n?>[ \t]*$", "")   -- drop a trailing game prompt char
     buf = buf:gsub("%s+$", "")
 
-    self._pending_lines = {}
+    local lines = {}
     if buf ~= "" then
         for line in (buf .. "\n"):gmatch("(.-)\n") do
-            table.insert(self._pending_lines, line)
+            lines[#lines + 1] = line
         end
     end
+
+    -- The Twine player re-sends the whole passage when a link reveals text or
+    -- timed text appears. Don't make the reader page through it again: lines
+    -- they already saw that are unchanged go straight into the transcript, and
+    -- paging resumes a little above the first change.
+    local prefill = 0
+    if self._same_page and self._turn_lines then
+        local seen = math.min(self._revealed_count or 0, #self._turn_lines, #lines)
+        local same = 0
+        while same < seen and self._turn_lines[same + 1] == lines[same + 1] do
+            same = same + 1
+        end
+        prefill = math.max(0, same - PAGE_CONTEXT_LINES)
+    end
+    self._same_page = false
+    self._turn_lines = lines
+    self._revealed_count = prefill
+
+    self._pending_lines = {}
+    for i = prefill + 1, #lines do
+        self._pending_lines[#self._pending_lines + 1] = lines[i]
+    end
+    if prefill > 0 then
+        if self.transcript ~= "" then
+            self.transcript = self.transcript .. "\n"
+        end
+        self.transcript = self.transcript .. table.concat(lines, "\n", 1, prefill)
+    end
     self:_revealNextPage()
+end
+
+-- Whether save/restore can run now: a Glk game needs its command (line)
+-- prompt, because saving goes through the game's own verbs; the Twine player
+-- saves its state at any input request.
+function GameView:_atSavePoint()
+    if self.state_saves then
+        return self._input_kind ~= nil or self._input_links
+    end
+    return self._input_kind == "line"
 end
 
 function GameView:_linesPerPage()
@@ -1053,6 +1273,7 @@ function GameView:_revealNextPage()
     while #revealed < n and #self._pending_lines > 0 do
         table.insert(revealed, table.remove(self._pending_lines, 1))
     end
+    self._revealed_count = (self._revealed_count or 0) + #revealed
     if #revealed > 0 then
         if self.transcript ~= "" then
             self.transcript = self.transcript .. "\n"
@@ -1110,6 +1331,15 @@ function GameView:showMenu()
             end,
         }},
     }
+    if self.engine and self.state_saves then
+        table.insert(buttons, {{
+            text     = _("Undo"),
+            callback = function()
+                UIManager:close(menu)
+                self:_undo()
+            end,
+        }})
+    end
     if self.engine and self.save_dir then
         table.insert(buttons, {{
             text     = _("Save game"),
@@ -1158,6 +1388,17 @@ function GameView:showMenu()
         buttons = buttons,
     }
     UIManager:show(menu)
+end
+
+-- Step back one passage (Twine player only). Asynchronous like a turn: the
+-- player re-sends the earlier page, or reports there was nothing to undo.
+function GameView:_undo()
+    if not self.engine or self._polling then return end
+    self:_cancelTimer()
+    self._awaiting_more = false
+    self._last_marked = nil
+    self.engine:send_undo()
+    self:_startPolling()
 end
 
 -- ── Illustrations ──────────────────────────────────────────────────────────────
@@ -1254,7 +1495,7 @@ end
 -- ── Save / restore slots ────────────────────────────────────────────────────────
 
 function GameView:_slotPath(name)
-    return self.save_dir .. "/" .. name .. ".qzl"
+    return self.save_dir .. "/" .. name .. self.save_ext
 end
 
 function GameView:_slotStatus(name)
@@ -1291,7 +1532,7 @@ function GameView:_showSaveSlots(mode)
     -- command prompt (same line input, same collapsed 0-height status grid), so
     -- any heuristic would also block normal play. We let the attempt proceed; at
     -- a genuine command prompt it works, elsewhere it fails gracefully.
-    if self._input_kind ~= "line" then
+    if not self:_atSavePoint() then
         UIManager:show(InfoMessage:new{
             text = _("Save and restore are only available at a command prompt."),
         })
@@ -1381,8 +1622,7 @@ function GameView:_resyncInput(u)
     if not u then return end
     self:_setStatusFromUpdate(u)
     if u.input then
-        self._input_kind   = u.input.kind
-        self._input_window = u.input.window
+        self:_takeInput(u)
     end
 end
 
@@ -1390,7 +1630,14 @@ function GameView:_engineSave(path)
     if not self.engine then return false end
     -- The "save" verb requires a line prompt; sending it at a char prompt hangs
     -- the VM. Refuse rather than desync (caller treats false as "save failed").
-    if self._input_kind ~= "line" then return false end
+    if not self:_atSavePoint() then return false end
+    -- The Twine player writes its state itself and answers with one update.
+    if self.state_saves then
+        self.engine:send_savestate(path)
+        local done = self:_waitUpdate(SAVE_WAIT_S)
+        self:_resyncInput(done)
+        return done ~= nil and done.savestate ~= nil and done.savestate.ok == true
+    end
     self.engine:send_line(self._input_window, "save")
     -- These waits block the UI thread, so keep the ceilings tight: a healthy save
     -- returns the fileref prompt in well under a second. The guard loop only spins
@@ -1417,7 +1664,20 @@ function GameView:_engineRestore(path)
     if not self.engine then return false, nil end
     if not lfs.attributes(path, "mode") then return false, nil end
     -- Same line-prompt requirement as _engineSave.
-    if self._input_kind ~= "line" then return false, nil end
+    if not self:_atSavePoint() then return false, nil end
+    if self.state_saves then
+        self.engine:send_restorestate(path)
+        local done = self:_waitUpdate(SAVE_WAIT_S)
+        self:_resyncInput(done)
+        if not (done and done.restorestate and done.restorestate.ok) then
+            return false, nil
+        end
+        -- The restored page replaces the transcript, like any Twine page.
+        self.transcript     = ""
+        self._pending_lines = {}
+        self._last_marked   = ptf.runs_to_marked(done.story)
+        return true, self:_storyToBuf(done)
+    end
     self.engine:send_line(self._input_window, "restore")
     local u = self:_waitUpdate(SAVE_WAIT_S)
     local guard = 0
@@ -1438,10 +1698,41 @@ end
 -- ── Game-ended handler ─────────────────────────────────────────────────────────
 
 function GameView:_onGameEnded()
+    -- Ended before ever asking for input: the game never started, and that is
+    -- the interpreter failing, not a finished story.
+    if not self._started and self.on_startup_failure then
+        UIManager:show(ConfirmBox:new{
+            text        = _("The interpreter stopped before the game could start.")
+                          .. "\n\n" .. _("Run a diagnosis to find out why?"),
+            ok_text     = _("Diagnose"),
+            cancel_text = _("Close"),
+            ok_callback = function()
+                local diagnose = self.on_startup_failure
+                self:onClose()
+                diagnose()
+            end,
+            cancel_callback = function() self:onClose() end,
+        })
+        return
+    end
     UIManager:show(ConfirmBox:new{
         text        = _("The game has ended. Close the game view?"),
         ok_text     = _("Close"),
         ok_callback = function() self:onClose() end,
+    })
+end
+
+-- The interpreter still runs but hasn't answered for POLL_TIMEOUT_S: a story
+-- stuck in a script loop, or a very slow turn. Ask, rather than leave a silent
+-- page with the process spinning on the battery. Closing doesn't try to
+-- autosave: no input request is pending, so _atSavePoint() is false.
+function GameView:_onNotResponding()
+    UIManager:show(ConfirmBox:new{
+        text            = _("The game is not responding. Close it, or keep waiting?"),
+        ok_text         = _("Close"),
+        cancel_text     = _("Wait"),
+        ok_callback     = function() self:onClose() end,
+        cancel_callback = function() self:_startPolling() end,
     })
 end
 

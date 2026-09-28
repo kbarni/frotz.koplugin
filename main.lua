@@ -5,6 +5,7 @@ local LuaSettings     = require("luasettings")
 local lfs             = require("libs/libkoreader-lfs")
 local PathChooser     = require("ui/widget/pathchooser")
 local RenderText      = require("ui/rendertext")
+local TextViewer      = require("ui/widget/textviewer")
 local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -15,6 +16,7 @@ local T               = require("ffi/util").template
 local Screen          = require("device").screen
 
 local Resolver  = require("engines/resolver")
+local GameLibrary = require("gamelibrary")
 local monoface  = require("monoface")
 local rapidjson = require("rapidjson")
 
@@ -24,6 +26,9 @@ local _plugin_dir = debug.getinfo(1, "S").source:match("@(.+)/[^/]+$") or "."
 
 local DEFAULT_FONT_SIZE = 20
 local MAX_RECENT        = 10
+-- Recent games listed on the Simple UI homescreen (1…MAX_RECENT, see
+-- Frotz:_simpleuiRowCount).
+local DEFAULT_SIMPLEUI_ROWS = 3
 
 -- ── Interpreter binary lookup ────────────────────────────────────────────────────
 -- Prefer a per-arch binary under binaries/<arch>/, fall back to bin/ (the host
@@ -54,7 +59,9 @@ local _arch = detect_arch()
 local function binary_for(vm)
     -- detect_arch() now reliably distinguishes armel/armhf/x86_64, so the binary
     -- lives at exactly one path. No arch-guessing fallbacks needed.
-    local path = _plugin_dir .. "/binaries/" .. _arch .. "/" .. vm
+    -- Twine stories run on QuickJS (qjs) with the plugin's own player script.
+    local exe = (vm == "twine") and "qjs" or vm
+    local path = _plugin_dir .. "/binaries/" .. _arch .. "/" .. exe
     if lfs.attributes(path, "mode") then return path end
     return nil
 end
@@ -67,6 +74,28 @@ local Frotz = WidgetContainer:extend{
 
 function Frotz:init()
     self.ui.menu:registerToMainMenu(self)
+    self:_registerSimpleUI()
+end
+
+-- Launch the plugin from outside its own menu: opens the Recent games picker,
+-- or the game browser when nothing has been played yet. Simple UI's generic
+-- "add a plugin as a quick action" scan looks for a method named
+-- onShow/show/open/launch/onOpen (our main-menu entry is a submenu, so it has
+-- no callback for that scan to reuse) — `launch` is that hook, and it is a
+-- reasonable entry point for any other caller too.
+function Frotz:launch()
+    self:_openRecentPicker(true)
+end
+
+-- ── Simple UI integration ───────────────────────────────────────────────────────
+-- If the Simple UI plugin (simpleui.koplugin) is installed, add ourselves to its
+-- launch screen: a list of the last played games, and an "Interactive Fiction"
+-- quick action. Both live in simpleui_integration.lua, which no-ops when Simple
+-- UI is absent; see its header.
+function Frotz:_registerSimpleUI()
+    local ok, SimpleUI = pcall(require, "simpleui_integration")
+    if not (ok and type(SimpleUI) == "table" and SimpleUI.register) then return end
+    SimpleUI.register(self)
 end
 
 -- ── Persistent settings (last directory + recent games + font size) ─────────────
@@ -118,6 +147,15 @@ function Frotz:_buildMenuItems()
         })
     end
 
+    table.insert(items, {
+        text     = _("Diagnose interpreter…"),
+        callback = function()
+            -- The last played game doubles as the handshake test.
+            local last = self:_recentGames()[1]
+            self:_runDiagnosis(last and lfs.attributes(last, "mode") and last or nil)
+        end,
+    })
+
     return items
 end
 
@@ -144,24 +182,43 @@ function Frotz:_pushRecent(gamefile)
     self:_saveSetting("recent_games", list)
 end
 
-function Frotz:_buildRecentSubmenu()
-    local list  = self:_recentGames()
-    local kept  = {}
-    local items = {}
+-- The recent games that are still on the device, newest first, as
+--   { path = …, title = …, saved = true|false }
+-- Games whose file has gone are dropped from the stored list as we go, so
+-- every reader of the list agrees on it. Shared by the Tools submenu, the
+-- standalone picker and the Simple UI homescreen list.
+function Frotz:_recentEntries()
+    local list    = self:_recentGames()
+    local library = GameLibrary.open()
+    local kept, entries = {}, {}
     for _idx, path in ipairs(list) do
         if lfs.attributes(path, "mode") == "file" then
             table.insert(kept, path)
             local _dir, fname = util.splitFilePathName(path)
-            table.insert(items, {
-                text      = fname,
-                mandatory = lfs.attributes(self:_autosavePathFor(path), "mode")
-                            and _("saved") or nil,
-                callback  = function() self:_startGame(path) end,
+            -- A known title (from IFDB, or one a Twine story reported) reads
+            -- better than a file name like "index.html".
+            local entry = library:get(path)
+            table.insert(entries, {
+                path  = path,
+                title = (entry and entry.title) or fname,
+                saved = lfs.attributes(self:_autosavePathFor(path), "mode") ~= nil,
             })
         end
     end
     if #kept ~= #list then
         self:_saveSetting("recent_games", kept)
+    end
+    return entries
+end
+
+function Frotz:_buildRecentSubmenu()
+    local items = {}
+    for _idx, e in ipairs(self:_recentEntries()) do
+        table.insert(items, {
+            text      = e.title,
+            mandatory = e.saved and _("saved") or nil,
+            callback  = function() self:_startGame(e.path) end,
+        })
     end
     if #items > 0 then
         table.insert(items, {
@@ -182,7 +239,66 @@ function Frotz:_buildRecentSubmenu()
     return items
 end
 
+-- Standalone "Recent games" picker, used by the Simple UI launcher module (and
+-- usable from anywhere). Shows the recent games in a full-screen Menu; tapping
+-- one closes the picker and starts it. This mirrors _buildRecentSubmenu(), but
+-- as a self-contained window that closes itself on selection (the main menu
+-- closes automatically; a standalone Menu must be told to).
+-- browse_if_empty: no playable recent game left (first run, or every file gone)
+-- opens the game browser instead of a dead end. Set by callers that reach us
+-- from outside the Tools menu — a Simple UI quick action, say, where the menu
+-- the message points at isn't even on screen.
+function Frotz:_openRecentPicker(browse_if_empty)
+    self:_loadSettings()
+    local items = {}
+    local menu  -- forward reference so callbacks can close it
+    for _idx, e in ipairs(self:_recentEntries()) do
+        table.insert(items, {
+            text      = e.title,
+            mandatory = e.saved and _("saved") or nil,
+            -- Menu:onMenuSelect runs this callback, then close_callback, so
+            -- the picker closes itself; we only start the game here.
+            callback  = function() self:_startGame(e.path) end,
+        })
+    end
+
+    if #items == 0 then
+        if browse_if_empty then
+            self:_openFileBrowser()
+            return
+        end
+        UIManager:show(InfoMessage:new{
+            text = _("No recent games yet.\nOpen a game from the Tools menu ▸ Interactive Fiction."),
+        })
+        return
+    end
+
+    local Menu = require("ui/widget/menu")
+    menu = Menu:new{
+        title               = _("Recent games"),
+        item_table          = items,
+        is_popout           = false,
+        is_borderless       = true,
+        covers_fullscreen   = true,
+        title_bar_fm_style  = true,
+    }
+    menu.close_callback = function() UIManager:close(menu) end
+    UIManager:show(menu)
+end
+
 -- ── Display settings ────────────────────────────────────────────────────────────
+
+-- How many recent games the Simple UI homescreen list shows. Kept in our own
+-- settings rather than Simple UI's per-screen store, so the module stays free
+-- of Simple UI internals (see simpleui_integration.lua).
+function Frotz:_simpleuiRowCount()
+    self:_loadSettings()
+    return self._settings:readSetting("simpleui_rows") or DEFAULT_SIMPLEUI_ROWS
+end
+
+function Frotz:_setSimpleuiRowCount(n)
+    self:_saveSetting("simpleui_rows", n)
+end
 
 function Frotz:_fontSize()
     self:_loadSettings()
@@ -191,6 +307,23 @@ end
 
 -- ── File browser ──────────────────────────────────────────────────────────────
 
+-- An .html file is a game only if it holds a Twine story, and finding out reads
+-- the file, so answers are remembered by path, size and modification time.
+-- true / false, or nil when the file can't be examined.
+local _twine_checked = {}
+local function is_twine_story(path)
+    local attr = lfs.attributes(path)
+    if not attr or attr.mode ~= "file" then return nil end
+    local known = _twine_checked[path]
+    if known and known.size == attr.size and known.mtime == attr.modification then
+        return known.ok
+    end
+    local ok = Resolver.is_twine_file(path)
+    if ok == nil then return nil end
+    _twine_checked[path] = { size = attr.size, mtime = attr.modification, ok = ok }
+    return ok
+end
+
 function Frotz:_openFileBrowser()
     self:_loadSettings()
     local start_dir = self._settings:readSetting("game_directory")
@@ -198,12 +331,22 @@ function Frotz:_openFileBrowser()
     UIManager:show(PathChooser:new{
         select_directory = false,
         path             = start_dir,
-        -- Show both Z-machine and Glulx games (resolved by extension).
+        -- Show Z-machine, Glulx, TADS and Twine games (resolved by extension).
         -- KOReader's FileChooser reads this as `file_filter` (not `filter_func`),
         -- and only honours it when `show_unsupported` is false.
         show_unsupported = false,
         file_filter      = function(filename)
             return Resolver.is_supported(filename)
+        end,
+        -- file_filter gets only the name; an .html file must also hold a Twine
+        -- story, which takes the full path that FileChooser:show_file has. Set
+        -- here rather than after new(): the first listing happens in init.
+        show_file        = function(chooser, filename, fullpath)
+            if not PathChooser.show_file(chooser, filename, fullpath) then return false end
+            if fullpath and Resolver.vm_for(filename) == "twine" then
+                return is_twine_story(fullpath) == true
+            end
+            return true
         end,
         onConfirm = function(file_path)
             local dir = file_path:match("(.*)/")
@@ -236,8 +379,92 @@ function Frotz:_saveDirFor(gamefile)
     return DataStorage:getDataDir() .. "/frotz_saves/" .. safe_name
 end
 
+-- Glk VMs write their own save format; the Twine player writes JSON. The
+-- extension is mostly cosmetic — what matters is that a fileref answer has
+-- *some* extension, or RemGlk appends ".glksave" to it (rgfref.c) and the slot
+-- file lands somewhere we do not look — but an honest one helps when the save
+-- folder is opened on a computer.
+local function save_ext_for(gamefile)
+    local vm = Resolver.vm_for(gamefile)
+    if vm == "twine" then return ".json" end
+    if vm == "tadsr" then
+        return Resolver.ext_of(gamefile) == "gam" and ".sav" or ".t3v"
+    end
+    return ".qzl"
+end
+
 function Frotz:_autosavePathFor(gamefile)
-    return self:_saveDirFor(gamefile) .. "/autosave.qzl"
+    return self:_saveDirFor(gamefile) .. "/autosave" .. save_ext_for(gamefile)
+end
+
+-- Arguments the VM gets before the story file. bocfel re-plays the whole
+-- transcript ("[Starting history playback]") on a verb restore unless -H is
+-- given; git (Glulx) has no such replay and rejects the flag, so only bocfel
+-- gets it. qjs takes the Twine player script first, then the story file.
+-- data: images are decoded into the game's save folder, not /tmp (a small RAM
+-- disk on e-readers).
+local function vm_args(vm, save_dir)
+    if vm == "bocfel" then
+        return { "-H" }
+    elseif vm == "twine" then
+        return { _plugin_dir .. "/twine/player.js", "--images=" .. save_dir .. "/images" }
+    end
+end
+
+-- ── Diagnosis ─────────────────────────────────────────────────────────────────
+-- diagnose.lua checks the binaries, /tmp and the spawn, then starts `gamefile`
+-- (optional) the way the plugin does; the report opens in a TextViewer and the
+-- detail goes to DataDir/frotz_diag.log.
+
+function Frotz:_runDiagnosis(gamefile)
+    local game
+    local vm = gamefile and Resolver.vm_for(gamefile)
+    if vm then
+        local exe = (vm == "twine") and "qjs" or vm
+        game = {
+            vm         = vm,
+            binary     = _plugin_dir .. "/binaries/" .. _arch .. "/" .. exe,
+            gamefile   = gamefile,
+            extra_args = vm_args(vm, self:_saveDirFor(gamefile)),
+        }
+    end
+    local wait = InfoMessage:new{ text = _("Checking the interpreter…\nThis takes a few seconds.") }
+    UIManager:show(wait)
+    UIManager:forceRePaint()
+    UIManager:nextTick(function()
+        local data_dir = DataStorage:getDataDir()
+        local ok, report = pcall(require("diagnose").run, {
+            plugin_dir = _plugin_dir,
+            arch       = _arch,
+            game       = game,
+            log_path   = data_dir .. "/frotz_diag.log",
+            crash_logs = { data_dir .. "/crash.log", "crash.log" },
+        })
+        UIManager:close(wait)
+        if not ok then
+            logger.err("Frotz: diagnosis failed:", report)
+            UIManager:show(InfoMessage:new{ text = _("The diagnosis itself failed:\n") .. tostring(report) })
+            return
+        end
+        logger.info("Frotz: diagnosis written to", report.log_path)
+        local text = report.text
+        if gamefile then
+            text = T(_("Game tested: %1"), gamefile) .. "\n\n" .. text
+        end
+        UIManager:show(TextViewer:new{
+            title = _("Interpreter diagnosis"),
+            text  = text,
+        })
+    end)
+end
+
+-- Ask before diagnosing: it takes a few seconds.
+function Frotz:_offerDiagnosis(message, gamefile)
+    UIManager:show(ConfirmBox:new{
+        text        = message .. "\n\n" .. _("Run a diagnosis to find out why?"),
+        ok_text     = _("Diagnose"),
+        ok_callback = function() self:_runDiagnosis(gamefile) end,
+    })
 end
 
 function Frotz:_startGame(gamefile)
@@ -253,11 +480,17 @@ function Frotz:_startGame(gamefile)
         })
         return
     end
+    -- An HTML page that isn't a Twine story (a walkthrough, a web page) can
+    -- still arrive here, e.g. from Recent games: say so instead of starting.
+    if vm == "twine" and is_twine_story(gamefile) == false then
+        UIManager:show(InfoMessage:new{
+            text = T(_("This HTML file is not a Twine story:\n%1"), gamefile),
+        })
+        return
+    end
     local binary = binary_for(vm)
     if not binary then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Interpreter binary not found: %1 (arch %2)"), vm, _arch),
-        })
+        self:_offerDiagnosis(T(_("Interpreter binary not found: %1 (arch %2)"), vm, _arch), gamefile)
         return
     end
 
@@ -279,44 +512,75 @@ function Frotz:_startGame(gamefile)
     -- rows is advertised tall so the VM never paginates; the UI owns paging.
     local rows = 200
 
+    -- TADS 2 (.gam) dies with "stack smashing detected" before its first update
+    -- if the handshake advertises 256 columns or more — its osifc layer carries
+    -- fixed 256-byte line buffers. 255 is fine, 256 is fatal; TADS 3 is immune
+    -- (tested to 1000). Only a very wide screen at a small font gets near it
+    -- (a Scribe at 1860px with a ~7px advance is ~265), but the failure mode is
+    -- a dead VM with nothing on screen, so clamp it.
+    -- Clamp ONLY what we send the VM: GameView keeps the true `cols`, so the
+    -- transcript still wraps to the full screen width.
+    local engine_cols = cols
+    if Resolver.ext_of(gamefile) == "gam" then
+        engine_cols = math.min(cols, 200)
+    end
+
     self:_pushRecent(gamefile)
 
     -- Per-game save directory holds the numbered slots and the autosave.
     local _dir, fname   = util.splitFilePathName(gamefile)
+    local library       = GameLibrary.open()
+    local known         = library:get(gamefile)
+    local known_title   = known and known.title
     local save_dir      = self:_saveDirFor(gamefile)
     util.makePath(save_dir)
     local autosave_path = self:_autosavePathFor(gamefile)
 
-    -- bocfel re-plays the whole transcript ("[Starting history playback]") on a
-    -- verb restore unless -H is given; git (Glulx) has no such replay and rejects
-    -- the flag, so only pass it to bocfel.
-    local extra_args = (vm == "bocfel") and { "-H" } or nil
+    local is_twine = vm == "twine"
+    local extra_args = vm_args(vm, save_dir)
+    if is_twine and not lfs.attributes(extra_args[1], "mode") then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Twine player not found: %1"), extra_args[1]),
+        })
+        return
+    end
 
     local function launch(auto_restore)
         local ok, transport = pcall(Session.new, Session, binary, gamefile, extra_args)
         if not ok then
-            UIManager:show(InfoMessage:new{
-                text = _("Failed to start interpreter:\n") .. tostring(transport),
-            })
             logger.err("Frotz: session error:", transport)
+            self:_offerDiagnosis(_("Failed to start interpreter:\n") .. tostring(transport), gamefile)
             return
         end
-        local engine = RemGlk:new(transport, rapidjson, cols, rows)
+        local engine = RemGlk:new(transport, rapidjson, engine_cols, rows)
 
         local game_view = GameView:new{
             engine       = engine,
-            game_title   = fname,
+            game_title   = known_title or fname,
+            -- An IFDB title stays; otherwise a story's own title (Twine)
+            -- replaces the file name and is remembered for the recent list.
+            keep_title   = known ~= nil and known.source == "ifdb" and known_title ~= nil,
+            on_title     = function(story_title)
+                library:put(gamefile, { title = story_title })
+            end,
             game_path    = gamefile,
             font_size    = font_size,
             cols         = cols,
             settings     = self._settings,
             save_dir     = save_dir,
             auto_restore = auto_restore,
+            link_mode    = is_twine,
+            state_saves  = is_twine,
+            save_ext     = save_ext_for(gamefile),
             -- The hosting FileManager/ReaderUI register a "dictionary" module;
             -- passing ui through enables hold-to-look-up in the transcript.
             ui           = self.ui,
             on_close     = function()
                 self._game_view = nil
+            end,
+            -- The VM died before the game got going: offer the diagnosis.
+            on_startup_failure = function()
+                self:_runDiagnosis(gamefile)
             end,
         }
         self._game_view = game_view
