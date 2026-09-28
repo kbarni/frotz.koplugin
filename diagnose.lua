@@ -7,7 +7,8 @@
 --   * whether the binaries exist, are executable, and really run
 --   * whether the plugin sits on a noexec mount
 --   * whether /tmp is usable (the transport puts its FIFO and files there)
---   * how long the background spawn session.lua uses takes to report its PID
+--   * whether session.lua itself can start the VM from KOReader's process, and
+--     the launching shell's own complaint when it cannot
 --   * a full handshake with the game that failed, when there is one
 --   * the plugin's lines in KOReader's crash.log
 --
@@ -36,9 +37,6 @@ local function now_ms()
     local n = tonumber(t)
     return n and math.floor(n / 1e6) or os.time() * 1000
 end
-
--- session.lua waits this long for the spawned shell's PID file.
-local PID_WAIT_MS = 2000
 
 -- Binaries the plugin can use; the first two cover almost every game.
 local ALL_VMS = { "bocfel", "git", "tadsr", "qjs" }
@@ -134,6 +132,14 @@ function Run:check_system()
     self:section("System")
     self:log("%s", (sh("uname -a"):gsub("\n$", "")))
     self:log("user: %s", (sh("id"):gsub("\n$", "")))
+    -- What differs between KOReader's process and a terminal, where the
+    -- same commands may work: working dir (binary paths can be relative),
+    -- environment, and the shell os.execute runs.
+    self:log("working dir: %s", tostring(lfs.currentdir()))
+    for _, var in ipairs({ "PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "HOME", "TMPDIR" }) do
+        self:log("%s=%s", var, os.getenv(var) or "<unset>")
+    end
+    self:log("%s", (sh("ls -l /bin/sh"):gsub("\n$", "")))
     local meminfo = read_file("/proc/meminfo") or ""
     self:log("%s", meminfo:match("MemTotal[^\n]*") or "MemTotal: ?")
     self:log("%s", meminfo:match("MemAvailable[^\n]*") or "MemAvailable: ?")
@@ -202,10 +208,19 @@ end
 function Run:check_tmp()
     self:section("/tmp")
     self:log("%s", sh("df -k /tmp"))
+    self:log("%s", sh("df -i /tmp"))
+    self:log("%s", sh("ls -ld /tmp /tmp/"))
+    -- Write real bytes and read them back: on a full /tmp creating a file
+    -- still works, only the write fails — and that is how the PID file
+    -- comes out empty.
     local probe = "/tmp/frotz_diag_write_test"
+    local payload = string.rep("0123456789", 10)
     local f = io.open(probe, "w")
-    if f then
-        f:close(); os.remove(probe)
+    local wrote = f and f:write(payload) and f:close()
+    if f and not wrote then pcall(f.close, f) end
+    local back = read_file(probe)
+    os.remove(probe)
+    if back == payload then
         self:res("PASS", "/tmp is writable")
     else
         self:res("FAIL", "/tmp is not writable",
@@ -318,37 +333,37 @@ function Run:check_binary(name)
     return true
 end
 
--- The exact spawn line session.lua uses, timed until the PID file appears.
-function Run:check_spawn()
-    self:section("Background spawn")
-    local fifo, out, err, pidf = self:tmp("sp.fifo"), self:tmp("sp.out"),
-                                 self:tmp("sp.err"), self:tmp("sp.pid")
-    os.execute("mkfifo " .. q(fifo))
+-- Start a session through session.lua itself, from inside KOReader's process:
+-- same code, user, working dir and environment as a real game start, which a
+-- terminal run of the same command line does not reproduce. With the failed
+-- game's own VM and paths when there is one, else a harmless `sleep`.
+function Run:check_spawn(vm_ok)
+    self:section("Background spawn (session.lua)")
+    local g = self.game
+    local binary, gamefile, args = "sleep", "30", nil
+    if g and g.binary and g.gamefile and vm_ok then
+        binary, gamefile, args = g.binary, g.gamefile, g.extra_args
+    end
+    self:log("starting: %s %s%s", binary,
+        args and (table.concat(args, " ") .. " ") or "", gamefile)
+    local ok_req, Session = pcall(require, "session")
+    if not ok_req then
+        self:log("cannot load session.lua: %s", tostring(Session))
+        return
+    end
     local start = now_ms()
-    os.execute(string.format("LC_ALL=C LANG=C sleep 5 < %s > %s 2> %s & echo $! > %s",
-        q(fifo), q(out), q(err), q(pidf)))
-    local pid
-    while now_ms() - start < 5000 do
-        pid = tonumber(read_file(pidf) or "")
-        if pid then break end
-        sleep_ms(20)
-    end
+    local ok, s = pcall(Session.new, Session, binary, gamefile, args)
     local elapsed = now_ms() - start
-    self:log("PID file after %d ms: %s", elapsed, tostring(pid))
-    if not pid then
-        self:res("FAIL", "no PID file after 5 s",
-            "the device never reported the started process, which the plugin reports as 'binary missing or not executable'",
-            "post the log — the binary is not at fault")
-    elseif elapsed > PID_WAIT_MS then
-        self:res("FAIL", "starting a process took " .. elapsed .. " ms, the plugin waits "
-            .. PID_WAIT_MS .. " ms",
-            "this device is too slow to start a background process for the plugin",
-            "report this number — the plugin has to wait longer on your device")
+    if ok then
+        self:log("started PID %s after %d ms", tostring(s.pid), elapsed)
+        self:res("PASS", "the plugin's own start-up code reported its PID in " .. elapsed .. " ms")
+        s:terminate()
     else
-        self:res("PASS", "background start reported its PID in " .. elapsed .. " ms")
+        self:log("error: %s", tostring(s))
+        self:res("FAIL", "the plugin's own start-up code failed: " .. tostring(s),
+            "the shell that starts the interpreter did not report it — the binary is not at fault",
+            "post the log — the shell's message and the /tmp details are in there")
     end
-    if pid then os.execute("kill " .. pid .. " 2>/dev/null") end
-    for _, p in ipairs({ fifo, out, err, pidf }) do os.remove(p) end
 end
 
 local SIGNALS = {
@@ -541,7 +556,7 @@ function M.run(opts)
     self:check_tmp()
     local runnable = {}
     for _, name in ipairs(ALL_VMS) do runnable[name] = self:check_binary(name) end
-    self:check_spawn()
+    self:check_spawn(self.vm_exe ~= nil and runnable[self.vm_exe])
     if self.vm_exe == nil or runnable[self.vm_exe] then
         self:check_handshake()
     end
