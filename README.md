@@ -8,7 +8,7 @@ It uses RemGlk-linked interpreters that speak a structured JSON protocol, so the
 
 - **Bocfel** — [Z-machine](https://www.ifwiki.org/Z-machine) games: `.z1`–`.z8`, `.zblorb`, `.zlb`, `.dat` (the most common interactive fiction format)
 - **Git** — Glulx games (modern Inform 7): `.ulx`, `.gblorb`, `.glb`, `.blb`, `.blorb`
-- **GlkTADS** — [TADS](https://www.tads.org) 2 and 3 games: `.gam`, `.t3` (one binary plays both)
+<!--- **GlkTADS** — [TADS](https://www.tads.org) 2 and 3 games: `.gam`, `.t3` (one binary plays both)-->
 - **Twine** — [Twine](https://twinery.org) stories, published as a single `.html`/`.htm` file, run by the plugin's own Twine player on the [QuickJS](https://bellard.org/quickjs/) JavaScript engine.
 
 The plugin is text-focused. Illustrations *are* available: the story shows a link (e.g. `[Illustration 3]`), and tapping it (or the menu's **Illustrations** entry) opens the picture in KOReader's image viewer. Decorative and repeated images (borders in Glulx games, graphical page elements in Twine games) are left out. For full graphics support, use the **[Gargoyle application](https://github.com/kbarni/garglk)** for Kindle instead.
@@ -124,7 +124,7 @@ The interpreters are bundled as separate binaries, each under its own license:
 
 - **[Bocfel](https://github.com/garglk/garglk/tree/master/terps/bocfel)** — Z-machine VM by Chris Spiegel
 - **[Git](https://github.com/DavidKinder/Git)** — Glulx VM by Iain Merrick
-- **[GlkTADS](https://github.com/tads-intfic/tads-runner)** — TADS 2/3 VM by Michael J. Roberts, Glk port extracted from Gargoyle (GPL-2.0)
+<!--- **[GlkTADS](https://github.com/tads-intfic/tads-runner)** — TADS 2/3 VM by Michael J. Roberts, Glk port extracted from Gargoyle (GPL-2.0)-->
 - **[RemGlk](https://github.com/erkyrath/remglk)** — the JSON Glk I/O layer by Andrew Plotkin
 - **[QuickJS](https://bellard.org/quickjs/)** — JavaScript engine by Fabrice Bellard and Charlie Gordon (MIT), which runs the Twine player
 
